@@ -52,16 +52,16 @@ sudo nginx -t && sudo nginx -s reload
 ```python
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
-class UploadHandler(BaseHTTPRequestHandler):
+class SimpleUploadHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         content_length = int(self.headers.get('Content-Length', 0))
         body = self.rfile.read(content_length)
         print(f"Received {len(body)} bytes")
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"✅ Upload received.")
+        self.wfile.write(b"Upload received.")
 
-server = HTTPServer(('0.0.0.0', 3000), UploadHandler)
+server = HTTPServer(('0.0.0.0', 3000), SimpleUploadHandler)
 print("Listening on port 3000...")
 server.serve_forever()
 ```
