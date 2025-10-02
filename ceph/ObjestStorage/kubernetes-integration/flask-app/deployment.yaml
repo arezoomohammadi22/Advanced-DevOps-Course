@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flask-s3
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: flask-s3
+  template:
+    metadata:
+      labels:
+        app: flask-s3
+    spec:
+      nodeName: k8s-master   # 👈 replace with your actual master node name (kubectl get nodes)
+      tolerations:
+      - key: "node-role.kubernetes.io/master"
+        operator: "Exists"
+        effect: "NoSchedule"
+      - key: "node-role.kubernetes.io/control-plane"
+        operator: "Exists"
+        effect: "NoSchedule"
+      containers:
+      - name: flask-s3
+        image: flask-s3:latest
+        imagePullPolicy: IfNotPresent   # 👈 ensures it uses your locally-loaded image
+        ports:
+        - containerPort: 5000
+        envFrom:
+        - secretRef:
+            name: ceph-s3-secret
