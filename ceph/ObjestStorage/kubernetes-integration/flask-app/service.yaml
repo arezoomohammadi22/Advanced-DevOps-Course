@@ -1,0 +1,12 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: flask-s3
+spec:
+  selector:
+    app: flask-s3
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 5000
+  type: NodePort
