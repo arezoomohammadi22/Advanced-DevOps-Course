@@ -1,0 +1,26 @@
+filebeat.inputs:
+  - type: filestream
+    id: my-filestream-id
+    enabled: true
+    paths:
+      - /root/file01.log
+    data_stream.dataset: "myapp"
+    data_stream.namespace: "prod"
+
+filebeat.config.modules:
+  path: ${path.config}/modules.d/*.yml
+  reload.enabled: false
+
+setup.template.settings:
+  index.number_of_shards: 1
+
+output.elasticsearch:
+  hosts: ["https://10.211.55.63:9200"]
+  username: "sananet"
+  password: ""
+  ssl:
+    certificate_authorities: ["/etc/filebeat/cacert.pem"]
+    # اگر با IP وصل می‌شوی و mismatch داری، موقتاً باز کن:
+    # verification_mode: certificate
+
+processors: []
