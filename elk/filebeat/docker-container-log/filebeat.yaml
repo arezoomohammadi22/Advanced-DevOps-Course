@@ -1,0 +1,36 @@
+# /etc/filebeat/filebeat.yml
+filebeat.inputs:
+  - type: filestream
+    id: docker-logs
+    enabled: true
+    paths:
+      - /var/lib/docker/containers/*/*.log
+
+    # پارسر مخصوص لاگ‌های docker (JSON) 
+    parsers:
+      - container:
+          stream: all          # stdout و stderr هر دو
+          # اگر لاگ‌ها خیلی کوچک‌اند و Filebeat گیر fingerprint می‌کند:
+          # prospector.scanner.fingerprint.length: 256
+          # prospector.scanner.fingerprint.offset: 0
+
+    # برای Data Stream نام‌گذاری معنادار:
+    data_stream.dataset: "docker"
+    data_stream.namespace: "prod"
+
+# ماژول‌ها لازم نیستند
+filebeat.modules: []
+
+# متادیتای داکر (image, container.name, labels و...)
+processors:
+  - add_docker_metadata: ~
+
+# خروجی به ES با TLS (CA داخلی)
+output.elasticsearch:
+  hosts: ["https://10.211.55.63:9200"]
+  username: "sananet"
+  password: ""
+  ssl:
+    certificate_authorities: ["/etc/filebeat/cacert.pem"]
+    # اگر با IP می‌زنی و cert برای hostname صادر شده:
+    # verification_mode: certificate
