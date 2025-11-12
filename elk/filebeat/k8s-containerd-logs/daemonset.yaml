@@ -1,0 +1,85 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: filebeat
+  namespace: observability
+  labels:
+    app: filebeat
+spec:
+  selector:
+    matchLabels:
+      app: filebeat
+  template:
+    metadata:
+      labels:
+        app: filebeat
+    spec:
+      serviceAccountName: filebeat
+      terminationGracePeriodSeconds: 30
+      # Run on all nodes
+      tolerations:
+        - operator: "Exists"
+      containers:
+        - name: filebeat
+          image: docker.elastic.co/beats/filebeat:9.2.1
+          imagePullPolicy: IfNotPresent
+          args: ["-c", "/etc/filebeat.yml", "-e"]
+          env:
+            - name: ES_USERNAME
+              valueFrom:
+                secretKeyRef:
+                  name: es-basic-auth
+                  key: username
+                  optional: true
+            - name: ES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: es-basic-auth
+                  key: password
+                  optional: true
+            - name: KUBE_NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: config
+              mountPath: /etc/filebeat.yml
+              subPath: filebeat.yml
+              readOnly: true
+            - name: varlogcontainers
+              mountPath: /var/log/containers
+              readOnly: true
+            - name: varlogpods
+              mountPath: /var/log/pods
+              readOnly: true
+            - name: varlibcontainerd
+              mountPath: /var/lib/containerd
+              readOnly: true
+            - name: es-ca
+              mountPath: /etc/ssl/elastic
+              readOnly: true
+            - name: data
+              mountPath: /usr/share/filebeat/data
+      volumes:
+        - name: config
+          configMap:
+            name: filebeat-config
+            defaultMode: 0644
+        - name: varlogcontainers
+          hostPath:
+            path: /var/log/containers
+        - name: varlogpods
+          hostPath:
+            path: /var/log/pods
+        - name: varlibcontainerd
+          hostPath:
+            path: /var/lib/containerd
+        - name: es-ca
+          secret:
+            secretName: es-ca
+        - name: data
+          hostPath:
+            path: /var/lib/filebeat-data
+            type: DirectoryOrCreate
