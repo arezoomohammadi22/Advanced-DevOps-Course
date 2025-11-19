@@ -16,6 +16,12 @@ spec:
     spec:
       serviceAccountName: filebeat
       terminationGracePeriodSeconds: 30
+      # Map in-cluster hostname(s) to external ES IP
+      hostAliases:
+        - ip: "10.211.55.63"             # <-- change to your Elasticsearch IP if needed
+          hostnames:
+            - "elasticsearch"
+            - "elasticsearch.local"
       # Run on all nodes
       tolerations:
         - operator: "Exists"
@@ -25,18 +31,20 @@ spec:
           imagePullPolicy: IfNotPresent
           args: ["-c", "/etc/filebeat.yml", "-e"]
           env:
-            - name: ES_USERNAME
+            - name: ELASTICSEARCH_HOSTS
+              value: '["https://elasticsearch:9200"]'
+            - name: ELASTICSEARCH_USERNAME
               valueFrom:
                 secretKeyRef:
                   name: es-basic-auth
                   key: username
-                  optional: true
-            - name: ES_PASSWORD
+                  optional: false
+            - name: ELASTICSEARCH_PASSWORD        # ✅ fixed name here
               valueFrom:
                 secretKeyRef:
                   name: es-basic-auth
                   key: password
-                  optional: true
+                  optional: false
             - name: KUBE_NODE_NAME
               valueFrom:
                 fieldRef:
