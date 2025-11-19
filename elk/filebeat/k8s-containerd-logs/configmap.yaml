@@ -7,43 +7,33 @@ data:
   filebeat.yml: |
     filebeat.inputs:
       - type: filestream
-        id: k8s-container-logs
-        enabled: true
+        id: container-logs    # هر filestream باید id یکتا داشته باشه
+        prospector.scanner.symlinks: true
+
+        parsers:
+          - container: ~       # همون container parser
+
         paths:
           - /var/log/containers/*.log
 
-        parsers:
-          - container:
-              stream: all
-
-        # Optional: tune fingerprint for very small files
-        # prospector.scanner.fingerprint.length: 256
-        # prospector.scanner.fingerprint.offset: 0
-
-        # Data stream naming
-        data_stream.dataset: "kubernetes"
-        data_stream.namespace: "prod"
+        processors:
+          - add_kubernetes_metadata:
+              host: ${KUBE_NODE_NAME}
+              matchers:
+                - logs_path:
+                    logs_path: "/var/log/containers/"
 
     filebeat.modules: []
-
-    processors:
-      - add_kubernetes_metadata: ~
 
     output.elasticsearch:
       hosts: ["https://10.211.55.63:9200"]
 
-      # --- Use ONE of the following auth methods ---
-      # 1) API Key (recommended)
-
-      # 2) Basic auth (comment out api_key above)
-      username: ${ES_USERNAME}
-      password: ${ES_PASSWORD}
+      username: ${ELASTICSEARCH_USERNAME}
+      password: ${ELASTICSEARCH_PASSWORD}
 
       ssl:
         certificate_authorities: ["/etc/ssl/elastic/ca.crt"]
-        # If connecting via IP but cert is for a hostname, temporarily:
-        # verification_mode: certificate
+        verification_mode: none
 
-    # Filebeat internal logging (optional)
     logging.level: info
     logging.to_files: false
