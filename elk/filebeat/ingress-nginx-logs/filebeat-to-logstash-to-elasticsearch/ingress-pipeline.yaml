@@ -1,0 +1,45 @@
+input {
+  beats {
+    port => 5044
+    # ssl => true
+    # ssl_certificate => "/etc/logstash/certs/logstash.crt"
+    # ssl_key         => "/etc/logstash/certs/logstash.key"
+  }
+}
+
+filter {
+  if [kubernetes][namespace] == "ingress-nginx" {
+    
+    grok {
+      match => {
+        "message" => [
+          '%{IPORHOST:client.ip} - - \[%{HTTPDATE:ingress.time}\] "%{WORD:http.request.method} %{DATA:url.original} HTTP/%{NUMBER:http.version}" %{NUMBER:http.response.status_code:int} %{NUMBER:http.response.body.bytes:int} "%{DATA:http.referer}" "%{DATA:user_agent.original}" %{NUMBER:ingress.request_length:int} %{NUMBER:ingress.request_time:float} \[%{DATA:nginx.upstream_name}\] \[%{DATA:nginx.upstream_addr}\] - - - - %{DATA:ingress.request_id}'
+        ]
+      }
+      tag_on_failure => ["_ingress_grok_failure"]
+    }
+
+    date {
+      match  => ["ingress.time", "dd/MMM/yyyy:HH:mm:ss Z"]
+      target => "@timestamp"
+    }
+
+    # mutate {
+    #   remove_field => ["ingress.time"]
+    # }
+  }
+}
+
+output {
+  elasticsearch {
+    hosts  => ["https://10.211.55.63:9200"]
+    index  => "nginx-ingress-%{+YYYY.MM.dd}"
+    ssl_verification_mode  => none
+    ssl_enabled => true
+    ssl_certificate_authorities => ["/home/arezoo/cert/cacert.pem"]
+    user     => "${ES_USER}"
+    password => "${ES_PASSWORD}"
+  }
+
+   stdout { codec => rubydebug }
+}
