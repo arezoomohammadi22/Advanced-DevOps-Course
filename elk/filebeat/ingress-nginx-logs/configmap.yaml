@@ -1,0 +1,63 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: filebeat-config
+  namespace: observability
+data:
+  filebeat.yml: |
+    filebeat.inputs:
+      - type: filestream
+        id: ingress-nginx-logs
+        prospector.scanner.symlinks: true
+        parsers:
+          - container: ~
+        paths:
+          - /var/log/containers/*.log
+
+        # اسم data stream این‌جا تعیین می‌شه:
+        # logs-ingress_nginx-k8s
+        data_stream:
+          type: logs
+          dataset: ingress_nginx
+          namespace: k8s
+
+    processors:
+      - add_kubernetes_metadata:
+          host: ${KUBE_NODE_NAME}
+          matchers:
+            - logs_path:
+                logs_path: "/var/log/containers/"
+
+      # هرچی غیر ingress-nginx هست رو بنداز دور
+      - drop_event:
+          when:
+            not:
+              equals:
+                kubernetes.namespace: "ingress-nginx"
+
+      - decode_json_fields:
+          fields: ["message"]
+          target: ""
+          overwrite_keys: true
+
+      - drop_fields:
+          fields:
+            - "agent"
+            - "ecs"
+            - "host"
+            - "input"
+            - "log.offset"
+            - "log.file.path"
+            - "log.flags"
+          ignore_missing: true
+
+    output.elasticsearch:
+      hosts: ["https://10.211.55.63:9200"]
+      username: ${ELASTICSEARCH_USERNAME}
+      password: ${ELASTICSEARCH_PASSWORD}
+      ssl:
+        certificate_authorities: ["/etc/ssl/elastic/ca.crt"]
+        verification_mode: none
+
+    logging.level: info
+    logging.to_files: false
