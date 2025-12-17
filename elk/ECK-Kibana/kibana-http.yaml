@@ -1,0 +1,16 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: kibana-http
+  namespace: default
+spec:
+  entryPoints:
+    - web
+  routes:
+    - kind: Rule
+      match: Host(`kibana.sananetco.com`)
+      middlewares:
+        - name: redirect-to-https
+      services:
+        - name: kibana-logging-kb-http
+          port: 5601
