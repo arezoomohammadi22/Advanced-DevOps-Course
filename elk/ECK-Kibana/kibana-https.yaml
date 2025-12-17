@@ -1,0 +1,17 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: kibana-https
+  namespace: default
+spec:
+  entryPoints:
+    - websecure
+  routes:
+    - kind: Rule
+      match: Host(`kibana.sananetco.com`)
+      services:
+        - name: kibana-logging-kb-http
+          port: 5601
+          scheme: https
+          serversTransport: kibana-insecure
+  tls: {}
