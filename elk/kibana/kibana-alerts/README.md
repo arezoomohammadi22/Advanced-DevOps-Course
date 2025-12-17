@@ -87,10 +87,8 @@ Paste **exactly this JSON**:
 ```json
 {
   "rule_name": "{{rule.name}}",
-  "rule_id": "{{rule.id}}",
   "alert_id": "{{alert.id}}",
   "message": "{{context.message}}",
-  "count": "{{context.matchingDocuments}}",
   "@timestamp": "{{date}}"
 }
 ```
@@ -121,6 +119,7 @@ Create file: `watch_kibana_alerts.py`
 ```python
 import time
 import os
+import re
 from elasticsearch import Elasticsearch
 
 # =====================
@@ -132,12 +131,11 @@ ES_NODES = [
     "https://10.211.55.71:9200",
 ]
 
-ES_USER = "elastic"
-ES_PASS = "123456"
+ES_USER = "kibana_admin"
+ES_PASS = "StrongKibanaPass123!"
 
 ALERT_INDEX = "alerts-ssh-bruteforce"
 CHECK_INTERVAL = 5  # seconds
-
 STATE_FILE = "/tmp/last_alert_id.txt"
 
 # =====================
@@ -166,10 +164,16 @@ def get_latest_alert():
     res = es.search(
         index=ALERT_INDEX,
         size=1,
-        sort=[{"@timestamp": {"order": "desc"}}]
+        sort=[{"@timestamp": {"order": "desc"}}],
+        _source=["rule_name", "message", "count", "match_count", "host_ip", "@timestamp"]
     )
     hits = res["hits"]["hits"]
     return hits[0] if hits else None
+
+def extract_count_from_message(msg: str):
+    # مثال message شما: "Document count is 3 in the last 1m ..."
+    m = re.search(r"Document count is\s+(\d+)", msg or "")
+    return int(m.group(1)) if m else None
 
 # =====================
 # Main loop
@@ -189,11 +193,21 @@ while True:
         if alert_id != last_seen:
             src = alert["_source"]
 
+            # اولویت با فیلدی که خودت ذخیره کردی:
+            count = src.get("count")
+            if not count:
+                count = src.get("match_count")
+
+            # اگر باز هم نبود، از message استخراج کن:
+            if not count:
+                count = extract_count_from_message(src.get("message"))
+
             print("\n" + "="*50)
             print("🚨 ALERT TRIGGERED")
             print(f"Rule Name : {src.get('rule_name')}")
             print(f"Message   : {src.get('message')}")
-            print(f"Count     : {src.get('count')}")
+            print(f"Count     : {count}")
+            print(f"Host IP   : {src.get('host_ip')}")
             print(f"Time      : {src.get('@timestamp')}")
             print("="*50)
 
