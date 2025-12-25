@@ -198,13 +198,3 @@ This perfectly demonstrates Docker layer stacking.
   - Fast container startup
 - OverlayFS is what Docker actually uses on Linux
 
----
-
-## Recommended GitHub Repository Names
-
-- `docker-unionfs-layering-demo`
-- `docker-filesystem-layers-explained`
-- `container-layering-from-scratch`
-- `overlayfs-vs-unionfs-docker`
-- ⭐ **`docker-layering-deep-dive`** (Recommended)
-
