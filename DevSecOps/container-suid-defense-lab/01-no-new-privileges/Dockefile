@@ -1,0 +1,22 @@
+FROM debian:12-slim
+
+# Install build tools + libcap2-bin (capsh) for inspection
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc libc6-dev passwd libcap2-bin \
+ && rm -rf /var/lib/apt/lists/*
+
+# Create a non-root user
+RUN useradd -m -s /bin/bash attacker
+
+# Copy and compile the demo
+WORKDIR /opt
+COPY setuid.c /opt/setuid.c
+RUN gcc /opt/setuid.c -o /usr/local/bin/setuid-demo
+
+# Make it owned by root and SetUID
+RUN chown root:root /usr/local/bin/setuid-demo \
+ && chmod 4755 /usr/local/bin/setuid-demo
+
+# Default to non-root user
+USER attacker
+CMD ["/bin/bash"]
