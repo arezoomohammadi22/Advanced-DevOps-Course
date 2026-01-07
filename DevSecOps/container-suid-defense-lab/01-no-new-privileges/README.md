@@ -1,157 +1,185 @@
-# Baseline: Abusing a SetUID Binary in Docker (Lab 0)
+# Exercise 01 – no-new-privileges (Blocking SetUID / SetGID Escalation)
 
 > ⚠️ **Educational & Lab Use Only**
 >
-> This content is for DevSecOps/security training to understand how **SetUID/SetGID binaries** can lead to **privilege escalation inside a container**, and how to mitigate it safely. Do not use this on real systems you do not own/operate.
+> This lab demonstrates how the Linux security flag **no-new-privileges (NNP)** completely prevents
+> privilege escalation via **SetUID / SetGID binaries**, even when such binaries exist inside a container.
 
 ---
 
-## What you will build (baseline)
+## 🎯 Goal of this exercise
 
-You will build a Docker image that contains:
+You will prove that:
 
-- A minimal C program that tries to switch to `UID 0` (root) using `setuid(0)`
-- A non-root user named `attacker`
-- A compiled binary owned by `root` with the **SetUID bit** enabled (`chmod 4755`)
+- A SetUID-root binary **can exist**
+- The container user **can execute it**
+- But **no privilege escalation happens**
+- Because `no-new-privileges=true` blocks it at the kernel level
 
-When `attacker` runs the binary:
-
-- The binary starts with **EUID=0** due to SetUID (even though `attacker` is not root)
-- It then attempts to make the **real UID** become 0 (root) via `setuid(0)`
-- Finally it spawns a shell
-
-This is a classic **container-level privilege escalation** demo.
+This is the **most important and effective single defense** against SetUID abuse in containers.
 
 ---
 
-## Why this matters
+## 🔁 Prerequisite
 
-- **Root inside a container is not automatically root on the host.** Namespaces isolate a lot.
-- But **container root is still dangerous**, and misconfigurations (e.g., `--privileged`, mounting `/var/run/docker.sock`, excessive capabilities, weak LSM policies) can turn container-root into **host compromise**.
-
-This baseline lab is the foundation for the mitigations labs:
-- `no-new-privileges`
-- capabilities hardening
-- AppArmor / SELinux policies
-- user namespace remapping
-
----
-
-## Files in this lab
-
-- `setuid.c` — the vulnerable demo program
-- `Dockerfile` — builds the image, creates `attacker`, compiles, and sets SetUID  
-  - Includes `libcap2-bin` so you can use `capsh` for capability inspection.
-
----
-
-## Step 1 — Review the C program
-
-Open `setuid.c`:
-
-- `getuid()` returns the **real UID** (who you are)
-- `geteuid()` returns the **effective UID** (what privileges the process is running with)
-- With a SetUID-root binary, `geteuid()` becomes 0 even if `getuid()` is 1000
-
----
-
-## Step 2 — Build the Docker image
-
-From this directory:
+You must have completed **Lab 00 (Baseline)** and already built the image:
 
 ```bash
 docker build -t setuid-test .
 ```
 
+The image must contain:
+- `setuid.c`
+- `/usr/local/bin/setuid-demo` (SetUID root)
+- user `attacker`
+
 ---
 
-## Step 3 — Run the baseline (vulnerable) container
+## 🧠 What is no-new-privileges?
+
+`no-new-privileges` is a Linux kernel security flag that says:
+
+> A process and all its children are **never allowed to gain additional privileges**.
+
+This means:
+- SetUID binaries ❌
+- SetGID binaries ❌
+- File capabilities ❌
+- Privilege-raising execve ❌
+
+Once enabled, it **cannot be bypassed** from inside the container.
+
+---
+
+## 🧪 Step 1 – Run the container with no-new-privileges
+
+From the host:
 
 ```bash
-docker run --rm -it setuid-test
+docker run --rm -it \
+  --security-opt no-new-privileges:true \
+  setuid-test
 ```
 
-Inside the container, verify you are `attacker`:
+---
+
+## 🧪 Step 2 – Verify current user
+
+Inside the container:
 
 ```bash
 id
 ```
 
-Expected (similar):
+Expected:
 
 ```text
-uid=1000(attacker) gid=1000(attacker) groups=1000(attacker)
+uid=1000(attacker) gid=1000(attacker)
 ```
 
 ---
 
-## Step 4 — Confirm SetUID on the binary (why EUID becomes 0)
-
-Inside the container:
-
-```bash
-ls -l /usr/local/bin/setuid-demo
-stat /usr/local/bin/setuid-demo | egrep "Uid|Gid|Access"
-```
-
-Expected highlights:
-
-- `ls -l` shows `-rwsr-xr-x` (note the **s**)
-- The owner is `root:root`
-- `stat` shows `Access: (4755/-rwsr-xr-x)` and `Uid: ( 0/ root )`
-
-That **SetUID bit** (`4755`) is the direct reason `geteuid()` returns 0.
-
----
-
-## Step 5 — Execute the binary (observe privilege escalation)
-
-Still inside the container:
+## 🧪 Step 3 – Execute the SetUID binary
 
 ```bash
 /usr/local/bin/setuid-demo
 ```
 
-Expected output (similar):
+---
+
+## ❌ Expected result (IMPORTANT)
+
+Instead of becoming root, you should see something similar to:
 
 ```text
-[*] Before: uid=1000 euid=0
-[*] After : uid=0 euid=0
+setuid: Operation not permitted
 ```
 
-Now you are in a root shell inside the container. Confirm:
+Or:
+
+- `[*] Before: uid=1000 euid=1000`
+- UID remains `1000`
+
+Confirm:
 
 ```bash
 id
 ```
 
+```text
+uid=1000(attacker)
+```
+
+✔️ **Privilege escalation is fully blocked**
+
 ---
 
-## Step 6 — Capability inspection (optional but recommended)
-
-Because the Dockerfile installs `libcap2-bin`, you can inspect capabilities:
+## 🧪 Step 4 – Inspect securebits (optional, recommended)
 
 ```bash
 capsh --print
 ```
 
-This is useful later when you run with `--cap-drop ALL` and compare output.
+Look for this line:
+
+```text
+Securebits: ... (no-new-privs=1)
+```
+
+This confirms:
+- The kernel is enforcing no-new-privileges
+- SetUID is ignored even though the bit exists
 
 ---
 
-## Common pitfalls / troubleshooting
+## 🔬 Why this works (deep reason)
 
-### 1) “SetUID doesn't work”
-Common reasons:
+- Normally, SetUID changes **effective UID**
+- With `no-new-privileges`, the kernel blocks **any exec that would increase privileges**
+- The decision is made **before the program runs**
+- The binary cannot override it, even as root
 
-- The binary is not owned by `root`
-- The SetUID bit is not set (`chmod 4755 ...`)
-- The filesystem mount has `nosuid`
-- Runtime uses `--security-opt no-new-privileges:true` (it blocks gaining privileges via SetUID/SetGID)
-
-### 2) “I get EUID=0 but UID doesn't become 0”
-This can happen depending on runtime hardening (capabilities dropped, LSM policy, or securebits).
-In later labs you will intentionally cause this behavior to demonstrate defenses.
+This is **not a Docker feature** – it is pure Linux kernel security.
 
 ---
 
+## 🧠 Key takeaway
+
+> **If you enable only ONE security option in Docker, make it no-new-privileges.**
+
+It:
+- Stops SetUID / SetGID attacks
+- Stops file capability abuse
+- Works even if the container is compromised
+
+---
+
+## ❌ Common mistakes
+
+- Thinking `USER attacker` is enough ❌
+- Relying only on `cap-drop` ❌
+- Forgetting runtime flags ❌
+
+---
+
+## ✅ Recommended production baseline
+
+```bash
+docker run \
+  --security-opt no-new-privileges:true \
+  --cap-drop ALL \
+  --read-only \
+  --tmpfs /tmp \
+  your-image
+```
+
+---
+
+## 🔜 Next exercises
+
+- **Exercise 02** – Capabilities + no-new-privileges
+- **Exercise 03** – AppArmor profiles
+- **Exercise 04** – SELinux policies
+- **Exercise 05** – Docker User Namespace Remapping
+
+---
