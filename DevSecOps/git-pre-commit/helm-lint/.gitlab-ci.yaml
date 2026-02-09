@@ -1,0 +1,66 @@
+stages:
+  - helm-lint
+  - pre-commit
+  - build
+  - test
+  - deploy
+
+helm-lint:
+  stage: helm-lint
+  tags:
+    - docker-dind
+  image: docker.arvancloud.ir/dtzar/helm-kubectl:latest # Use the Helm Docker image for linting
+  script:
+    # Install necessary dependencies (if needed) and run helm lint
+    - helm lint ./deployment/  # Specify the path to your Helm charts
+  rules:
+    - if: '$CI_COMMIT_BRANCH'  # Run for every branch commit
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'  # Run for merge request events
+
+# Pre-commit job that runs before the actual pipeline
+pre-commit:
+  stage: pre-commit
+  tags:
+    - shell
+  rules:
+    - if: '$CI_COMMIT_BRANCH'  # Run for every branch commit
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'  # Run for merge request events
+  script:
+    # Check if there's any conflicting auto-fix configurations
+    - |
+      if [[ -n "$PRE_COMMIT_AUTO_FIX_BRANCH_ONLY" && -n "$PRE_COMMIT_AUTO_FIX_MR_ONLY" ]]; then
+        echo "Invalid configuration: PRE_COMMIT_AUTO_FIX_BRANCH_ONLY and PRE_COMMIT_AUTO_FIX_MR_ONLY are mutually exclusive."
+        exit 1
+      fi
+
+    # Enable debugging if required
+    - |
+      if [[ $PRE_COMMIT_DEBUG ]]; then
+        set -x
+        echo "DEBUGGING ENABLED" > /dev/stderr
+      fi
+
+    # Run the pre-commit hooks for all files
+    - |
+      status=0
+      pre-commit run --all-files || status=$?
+
+    # If issues are found, apply fixes if auto-fix is enabled
+    - |
+      if [[ -n "$PRE_COMMIT_AUTO_FIX" ]]; then
+        echo "Auto-fixing issues..."
+        git add -u .
+        git commit -m "auto fixes from pre-commit CI job" -m "job url: $CI_JOB_URL"
+        git push origin HEAD:$CI_COMMIT_REF_NAME
+        exit 1
+      fi
+
+    # Fail the job if issues persist
+    - |
+      if [[ $status -ne 0 ]]; then
+        exit 1
+      fi
+
+    # Otherwise, succeed
+    - |
+      exit 0
