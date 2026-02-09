@@ -1,0 +1,49 @@
+stages:
+  - build
+  - test
+  - sonar_analysis
+  - deploy  # Optional, if you're deploying after passing tests
+
+# Define cache for Python dependencies to speed up the pipeline
+cache:
+  paths:
+    - .venv/
+    - venv/
+    - pip-cache/
+
+# Install dependencies and prepare the environment
+before_script:
+  - python3 --version
+  - pip install --upgrade pip
+  - pip install -r requirements.txt  # Install Python dependencies
+
+# Build Stage
+build:
+  stage: build
+  tags:
+    - shell
+  script:
+    - echo "Building the Python Flask project..."
+    - python3 -m compileall .  # You can replace this with more build-related steps if needed
+
+# SonarQube Analysis Stage
+sonar_analysis:
+  stage: sonar_analysis
+  tags:
+    - shell
+  script:
+    - echo "Starting SonarQube analysis..."
+    - sonar-scanner -Dsonar.projectKey=my-flask-project-05 -Dsonar.sources=. -Dsonar.qualitygate.wait=true 
+  only:
+    - main  # Run SonarQube only on the main branch or any specific branches you'd like
+  allow_failure: false  # Ensure the pipeline fails if SonarQube scan fails (default behavior)
+
+# Optional Deploy Stage (e.g., to deploy your app to a server or cloud)
+deploy:
+  stage: deploy
+  script:
+    - echo "Deploying the project..."
+  tags:
+    - shell
+variables:
+  SONARQUBE_TOKEN: squ_2a892402dd17007e498ebfab6b67dc0db28fc79e
