@@ -1,0 +1,44 @@
+repos:
+  # Syntax and code quality checks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v2.3.0
+    hooks:
+      - id: check-yaml   # YAML syntax check
+      - id: end-of-file-fixer  # Fixes missing newline at the end of files
+      - id: trailing-whitespace  # Removes trailing whitespace
+
+  # Python code formatting with Black
+  - repo: https://github.com/psf/black
+    rev: 22.10.0
+    hooks:
+      - id: black   # Formats Python code
+
+  # Secret scanning to detect hardcoded secrets
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.0.3
+    hooks:
+      - id: detect-secrets
+        name: Detect Secrets
+        files: \.(py|yaml|json|env)$
+
+  # Dockerfile security checks with Hadolint
+  - repo: https://github.com/hadolint/hadolint
+    rev: v2.10.0
+    hooks:
+      - id: hadolint   # Lints Dockerfiles for security issues
+        name: Dockerfile Linter
+        files: Dockerfile
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v2.3.0
+    hooks:
+      - id: check-yaml
+        name: Check YAML Syntax (for Kubernetes manifests)
+        files: ^manifests/.*\.yaml$  # Only scan YAML files in the 'deployment' directory
+        exclude: ^deployment/templates/.*\.yaml$  # Exclude Helm chart files
+      - id: end-of-file-fixer
+        name: End of file fixer (for Kubernetes manifests)
+        files: ^manifests/.*\.yaml$
+      - id: trailing-whitespace
+        name: Trim trailing whitespace (for Kubernetes manifests)
+        files: ^manifests/.*\.yaml$
+
