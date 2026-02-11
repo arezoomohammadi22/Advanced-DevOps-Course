@@ -1,0 +1,25 @@
+stages:
+  - test
+  - security  # The security stage should come after the test stage
+
+variables:
+  SAST_EXCLUDED_PATHS: "node_modules/*,test/*"
+  API_KEY: 'fghjkl987yghjkmn'
+
+include:
+  - template: Security/SAST.gitlab-ci.yml  # You may need this for predefined SAST rules
+
+test:
+  script:
+    - echo "This is the testing stage"
+  stage: test
+  tags:
+    - docker-dedicated
+
+security_scan:
+  script:
+    - echo "Running security scan with Semgrep"
+    - semgrep --config https://semgrep.dev/p/secrets-python  # Use the Semgrep ruleset for secrets detection
+  stage: security  # Ensure this is the security stage
+  tags:
+    - docker-dedicated
