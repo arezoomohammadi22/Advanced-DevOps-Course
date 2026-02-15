@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-python-app
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: my-python-app
+  template:
+    metadata:
+      labels:
+        app: my-python-app
+    spec:
+      containers:
+      - name: my-python-app
+        image: my-python-app:v1
+        imagePullPolicy: IfNotPresent
+        env:
+        - name: VAULT_ADDR
+          value: "http://10.211.55.50:8200"
+        - name: VAULT_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: vault-secrets
+              key: vault-token
+        - name: KUBERNETES_API_URL
+          value: "https://kubernetes.default.svc"
+        - name: K8S_NAMESPACE
+          value: "sample"
+      serviceAccountName: test-service-account-with-generated-token
