@@ -1,0 +1,28 @@
+stages:
+  - retrieve-secrets
+
+retrieve_secrets:
+  stage: retrieve-secrets
+  image: hashicorp/vault:latest
+  tags:
+    - docker
+  script:
+    - export ROLE_ID=69f80a43-f774-2b2a-b96e-7402fe4b37f7
+    - export role_id=""
+    - export secret_id=""
+    - apk add curl
+    - apk add jq
+    - export VAULT_ADDR="http://10.211.55.50:8200" 
+    - export SECRET_ID=$(vault write -f auth/approle/role/gitlab-role/secret-id -format=json | jq -r '.data.secret_id')
+    - |
+     curl --request POST --data '{"role_id": "$ROLE_ID", "secret_id": "$SECRET_ID"}' $VAULT_ADDR/v1/auth/approle/login | jq -r '.auth.client_token' > vault_token.txt
+    - export VAULT_TOKEN=$(cat vault_token.txt)
+    - cat vault_token.txt
+
+    - export DB_PASSWORD=$(vault kv get -field=password secret/gitlab/my-secret)
+    
+    # Output the retrieved secret (optional, for debugging purposes, be careful with sensitive data)
+    - echo $DB_PASSWORD
+    
+    # Optional: Use the secret in your pipeline for further steps, such as deployment
+    # - some_other_command_using_db_password
