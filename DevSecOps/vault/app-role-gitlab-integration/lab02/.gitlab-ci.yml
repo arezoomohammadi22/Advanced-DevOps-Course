@@ -1,0 +1,32 @@
+variables:
+  WEB_APP: "http://10.211.55.50:8080"  # URL of your Flask service (where it's running)
+  VAULT_ROLE_ID: ""  
+  VAULT_ADDR: "http://10.211.55.50:8200"   # Your Vault Role ID (for "gitlab-role" AppRole)
+
+stages:
+  - deploy
+
+deploy:
+  stage: deploy
+  image: hashicorp/vault:latest
+  script:
+    - apk add curl
+    - apk add jq
+    # Get the Secret ID dynamically from the Flask service
+    - |
+      SECRET_ID=$(curl -X POST $WEB_APP/secret-id -H "Content-Type: application/json" -d '{"role": "gitlab-role"}' | jq -r '.secret_id')
+    - echo $SECRET_ID
+    # Authenticate to Vault using Role ID and the obtained Secret ID
+    - |
+      export VAULT_TOKEN=$(vault write -field=token auth/approle/login role_id=$VAULT_ROLE_ID secret_id=$SECRET_ID)
+
+    # Retrieve secrets from Vault
+    - echo $VAULT_TOKEN
+
+    - export DB_PASSWORD=$(vault kv get -field=password secret/gitlab/my-secret)
+    
+    # Output the retrieved secret (optional, for debugging purposes, be careful with sensitive data)
+    - echo $DB_PASSWORD
+
+  only:
+    - main
