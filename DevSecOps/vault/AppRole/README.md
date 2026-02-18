@@ -196,6 +196,49 @@ vault kv put secret/gitlab/my-secret username="gitlab_user" password="super_secr
 This will store the **`username`** and **`password`** for GitLab under the path `secret/gitlab/my-secret`.
 
 ---
+## Login and Obtain Token via cURL
+
+Once the AppRole is set up, you can authenticate and retrieve a token by sending a `POST` request to the `/auth/approle/login` endpoint. Here's how you can do it:
+
+### 1. **Obtain Vault Token Using cURL**:
+
+```bash
+curl --request POST   --data '{"role_id": "69f80a43-f774-2b2a-b96e-7402fe4b37f7", "secret_id": "a30ccfa8-247a-1d3d-b6a6-a4951b34bc5e"}'   http://10.211.55.50:8200/v1/auth/approle/login | jq .
+```
+
+- Replace `role_id` and `secret_id` with your actual values.
+- The `curl` command sends a `POST` request with the **Role ID** and **Secret ID** to authenticate and obtain a token.
+
+### 2. **Authenticate with Vault Using cURL**:
+
+Alternatively, you can use the Vault CLI:
+
+```bash
+vault write auth/approle/login   role_id=db02de05-fa39-4855-059b-67221c5c2f63   secret_id=6a174c20-f6de-a53c-74d2-6018fcceff64
+```
+
+---
+
+## Test Access to KV
+
+Once you've authenticated using the **Vault token**, you can test access to the **KV secrets**:
+
+### 1. **Test Read Access to Secret Path**:
+
+```bash
+vault kv get secret/gitlab/my-secret
+```
+
+This will retrieve the secret stored at the path `secret/gitlab/my-secret`. If the token has the correct **read** capability on this path, the secret will be displayed.
+
+### 2. **Test Listing Keys in Secret Path**:
+
+```bash
+vault kv get secret/gitlab/
+```
+
+This command lists all keys under the path `secret/gitlab/` if the policy has the **list** capability.
+---
 
 ## Conclusion
 
