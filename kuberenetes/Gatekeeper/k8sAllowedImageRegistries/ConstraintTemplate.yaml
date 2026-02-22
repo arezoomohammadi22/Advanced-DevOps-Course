@@ -1,0 +1,42 @@
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sallowedimageregistries
+  annotations:
+    description: "Restricts images to allowed registries"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sAllowedImageRegistries
+      validation:
+        openAPIV3Schema:
+          type: object
+          properties:
+            registries:
+              type: array
+              items:
+                type: string
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sallowedimageregistries
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          not registry_allowed(container.image)
+          msg := sprintf("Image %s is not from an allowed registry. Allowed: %v", 
+            [container.image, input.parameters.registries])
+        }
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.initContainers[_]
+          not registry_allowed(container.image)
+          msg := sprintf("Init image %s is not from an allowed registry", [container.image])
+        }
+        
+        # Check if image starts with an allowed registry
+        registry_allowed(image) {
+          allowed := input.parameters.registries[_]
+          startswith(image, allowed)
+        }
