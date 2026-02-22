@@ -1,0 +1,46 @@
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sblocklatestimage
+  annotations:
+    description: "Blocks images using the latest tag"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sBlockLatestImage
+      validation:
+        openAPIV3Schema:
+          type: object
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sblocklatestimage
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.containers[_]
+          uses_latest(container.image)
+          msg := sprintf("Container %s uses :latest tag. Use a specific version.", [container.name])
+        }
+        
+        violation[{"msg": msg}] {
+          container := input.review.object.spec.initContainers[_]
+          uses_latest(container.image)
+          msg := sprintf("Init container %s uses :latest tag", [container.name])
+        }
+        
+        # Check for :latest tag or no tag (which defaults to latest)
+        uses_latest(image) {
+          endswith(image, ":latest")
+        }
+        
+        uses_latest(image) {
+          not contains(image, ":")  # No tag specified
+        }
+        
+        uses_latest(image) {
+          # Handle digest references
+          contains(image, "@")
+          parts := split(image, "@")
+          not contains(parts[0], ":")
+        }
