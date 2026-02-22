@@ -1,0 +1,17 @@
+apiVersion: kyverno.io/v1
+kind: ClusterPolicy
+metadata:
+  name: require-nginx-label
+spec:
+  rules:
+    - name: check-label
+      match:
+        resources:
+          kinds:
+            - Pod
+      validate:
+        message: "Pods must have the label app=nginx"
+        pattern:
+          metadata:
+            labels:
+              app: "nginx"
