@@ -1,0 +1,17 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sBlockPrivilegedContainers
+metadata:
+  name: block-privileged-containers
+spec:
+  enforcementAction: deny  # اگر کانتینر privileged باشد، از ایجاد یا به‌روزرسانی پاد جلوگیری می‌شود
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]         # بررسی کانتینرهای داخل Pods
+      - apiGroups: ["apps"]
+        kinds: ["Deployment"]  # بررسی کانتینرهای داخل Deployments
+      - apiGroups: ["apps"]
+        kinds: ["StatefulSet"] # بررسی کانتینرهای داخل StatefulSets
+      - apiGroups: ["apps"]
+        kinds: ["DaemonSet"]   # بررسی کانتینرهای داخل DaemonSets
+  
