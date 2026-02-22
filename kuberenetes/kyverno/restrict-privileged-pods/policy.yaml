@@ -1,0 +1,18 @@
+apiVersion: kyverno.io/v1
+kind: Policy
+metadata:
+  name: restrict-privileged-pods
+spec:
+  rules:
+    - name: restrict-privileged
+      match:
+        resources:
+          kinds:
+            - Pod
+      validate:
+        message: "Privileged Pods are not allowed"
+        pattern:
+          spec:
+            containers:
+              - securityContext:
+                  privileged: false
