@@ -1,0 +1,36 @@
+apiVersion: templates.gatekeeper.sh/v1
+kind: ConstraintTemplate
+metadata:
+  name: k8sblockprivilegedcontainers
+  annotations:
+    description: "Blocks containers from running in privileged mode"
+spec:
+  crd:
+    spec:
+      names:
+        kind: K8sBlockPrivilegedContainers
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package k8sblockprivilegedcontainers
+        
+        violation[{"msg": msg}] {
+          # Check regular containers
+          container := input.review.object.spec.containers[_]
+          container.securityContext.privileged == true
+          msg := sprintf("Privileged container not allowed: %s", [container.name])
+        }
+        
+        violation[{"msg": msg}] {
+          # Check init containers
+          container := input.review.object.spec.initContainers[_]
+          container.securityContext.privileged == true
+          msg := sprintf("Privileged init container not allowed: %s", [container.name])
+        }
+        
+        violation[{"msg": msg}] {
+          # Check ephemeral containers
+          container := input.review.object.spec.ephemeralContainers[_]
+          container.securityContext.privileged == true
+          msg := sprintf("Privileged ephemeral container not allowed: %s", [container.name])
+        }
