@@ -1,0 +1,19 @@
+apiVersion: constraints.gatekeeper.sh/v1beta1
+kind: K8sAllowedImageRegistries
+metadata:
+  name: require-internal-registry
+spec:
+  enforcementAction: deny
+  match:
+    kinds:
+      - apiGroups: [""]
+        kinds: ["Pod"]
+      - apiGroups: ["apps"]
+        kinds: ["Deployment", "StatefulSet", "DaemonSet"]
+    excludedNamespaces:
+      - kube-system
+  parameters:
+    registries:
+      - "gcr.io/my-company/"
+      - "registry.sananetco.com/"
+      - "ghcr.io/my-org/"
