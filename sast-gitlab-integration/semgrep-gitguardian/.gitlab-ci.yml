@@ -3,6 +3,17 @@ stages:
 
 variables:
   SEMGREP_APP_TOKEN: 508560eeb174e197885ed45f9a9057b5
+gitleaks_scan:
+  stage: test
+  tags:
+    - k8s
+  image: zricethezav/gitleaks:latest  # Using Gitleaks Docker image
+  script:
+    - echo "Running Gitleaks scan for secrets..."
+    - gitleaks detect --source=. --report-path=gitleaks-report.json --verbose  # Scan the repo for secrets and generate a report
+  artifacts:
+    paths:
+      - gitleaks-report.json  # Store the report as an artifact for later access
 gitguardian-secrets-scan:
   image: gitguardian/ggshield:latest
   stage: test
