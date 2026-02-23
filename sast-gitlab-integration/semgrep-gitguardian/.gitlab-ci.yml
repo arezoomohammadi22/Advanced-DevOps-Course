@@ -1,0 +1,29 @@
+stages:
+  - test
+
+variables:
+  SEMGREP_APP_TOKEN: 508560eeb174e197885ed45f9a9057b5
+gitguardian-secrets-scan:
+  image: gitguardian/ggshield:latest
+  stage: test
+  variables:
+    GITGUARDIAN_API_KEY: 3A4159C66BfcBfE2DEDAB648173b98C3
+  script:
+    - ggshield secret scan ci
+  tags:
+    - k8s
+
+
+semgrep-SAST-scan:
+  stage: test
+  tags:
+    - shell
+  variables:
+    SEMGREP_APP_TOKEN: 508560ee71671a637cddd65eb174e197885ed45f9a9057b5041f89a35a4825a7 # Use the environment variable defined earlier for security
+  script:
+    - semgrep login
+    - semgrep --config p/default --config p/r2c-security-audit --config p/owasp-top-ten --config p/cwe-top-25 --config p/xss --config p/insecure-transport --config p/findsecbugs --config p/jwt --config p/sql-injection --config p/command-injection --config p/secrets --config p/trailofbits --config p/java --config p/javascript --config p/python --config p/react --config p/docker-compose --config p/dockerfile --config p/nginx --config p/terraform
+  artifacts:
+    paths:
+      - semgrep-report.json  # Assuming that Semgrep generates a JSON report
+    expire_in: 1 week  # Optional: Set an expiration for the artifact if needed
