@@ -1,0 +1,90 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  serviceName: prometheus
+  replicas: 1  # HA with 2 replicas
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+        thanos-store-api: "true"
+    spec:
+      serviceAccountName: default
+      containers:
+        # Prometheus container
+        - name: prometheus
+          image: prom/prometheus:v2.45.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.path=/prometheus
+            - --storage.tsdb.retention.time=6h  # Short retention, Thanos handles long-term
+            - --storage.tsdb.min-block-duration=2h
+            - --storage.tsdb.max-block-duration=2h
+            - --web.enable-lifecycle
+            - --web.enable-admin-api
+          ports:
+            - containerPort: 9090
+              name: http
+          volumeMounts:
+            - name: config
+              mountPath: /etc/prometheus
+            - name: data
+              mountPath: /prometheus
+            - name: tmp-volume  # Added writable volume for temp files
+              mountPath: /tmp  # Use /tmp for temporary file writes
+
+        # Thanos sidecar container
+        - name: thanos-sidecar
+          image: quay.io/thanos/thanos:v0.32.0
+          args:
+            - sidecar
+            - --prometheus.url=http://localhost:9090
+            - --tsdb.path=/prometheus
+            - --grpc-address=0.0.0.0:10901
+            - --http-address=0.0.0.0:10902
+            - --objstore.config-file=/etc/thanos/objstore.yml
+            - --reloader.config-envsubst-file=/tmp/prometheus.yml  # Use /tmp instead of /etc/prometheus
+          ports:
+            - containerPort: 10901
+              name: grpc
+            - containerPort: 10902
+              name: http
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          volumeMounts:
+            - name: data
+              mountPath: /prometheus
+            - name: config
+              mountPath: /etc/prometheus
+            - name: thanos-objstore
+              mountPath: /etc/thanos
+            - name: tmp-volume  # Added writable volume for temp files
+              mountPath: /tmp  # Ensure /tmp is available for writing
+
+      volumes:
+        - name: config
+          configMap:
+            name: prometheus-config
+        - name: thanos-objstore
+          secret:
+            secretName: thanos-objstore-config
+        - name: tmp-volume  # Added a writable tmp-volume for temp files
+          emptyDir: {}  # Using an emptyDir to create a temporary writable directory
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 5Gi
