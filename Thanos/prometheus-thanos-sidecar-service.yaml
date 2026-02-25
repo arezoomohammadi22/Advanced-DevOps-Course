@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus-thanos-sidecar
+  namespace: monitoring
+  labels:
+    thanos-store-api: "true"
+spec:
+  clusterIP: None
+  selector:
+    app: prometheus
+  ports:
+  - port: 10901
+    name: grpc
