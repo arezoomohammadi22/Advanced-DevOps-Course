@@ -1,0 +1,70 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: thanos-store-gateway
+  namespace: monitoring
+spec:
+  serviceName: thanos-store-gateway
+  replicas: 1
+  selector:
+    matchLabels:
+      app: thanos-store-gateway
+  template:
+    metadata:
+      labels:
+        app: thanos-store-gateway
+        thanos-store-api: "true"
+    spec:
+      containers:
+      - name: thanos-store-gateway
+        image: quay.io/thanos/thanos:v0.32.0
+        args:
+          - store
+          - --data-dir=/data
+          - --grpc-address=0.0.0.0:10901
+          - --http-address=0.0.0.0:10902
+          - --objstore.config-file=/etc/thanos/objstore.yml
+          - --index-cache-size=2GB
+          - --chunk-pool-size=2GB
+        ports:
+        - containerPort: 10901
+          name: grpc
+        - containerPort: 10902
+          name: http
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: objstore-config
+          mountPath: /etc/thanos
+        resources:
+          requests:
+            memory: 2Gi
+            cpu: 1
+          limits:
+            memory: 2Gi
+            cpu: 2
+      volumes:
+      - name: objstore-config
+        secret:
+          secretName: thanos-objstore-config
+  volumeClaimTemplates:
+  - metadata:
+      name: data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: thanos-store-gateway
+  namespace: monitoring
+spec:
+  clusterIP: None
+  selector:
+    app: thanos-store-gateway
+  ports:
+  - port: 10901
+    name: grpc
