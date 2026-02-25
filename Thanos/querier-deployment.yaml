@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: thanos-querier
+  namespace: monitoring
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: thanos-querier
+  template:
+    metadata:
+      labels:
+        app: thanos-querier
+    spec:
+      containers:
+      - name: thanos-querier
+        image: quay.io/thanos/thanos:v0.32.0
+        args:
+          - query
+          - --http-address=0.0.0.0:10902
+          - --grpc-address=0.0.0.0:10901
+          - --query.replica-label=prometheus_replica
+          - --store=dnssrv+_grpc._tcp.prometheus-thanos-sidecar.monitoring.svc.cluster.local
+          - --store=dnssrv+_grpc._tcp.thanos-store-gateway.monitoring.svc.cluster.local
+        ports:
+        - containerPort: 10902
+          name: http
+        - containerPort: 10901
+          name: grpc
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 10902
+          initialDelaySeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 10902
+          initialDelaySeconds: 15
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: thanos-querier
+  namespace: monitoring
+spec:
+  selector:
+    app: thanos-querier
+  ports:
+  - port: 10902
+    name: http
