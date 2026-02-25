@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring
+spec:
+  clusterIP: None  # This makes the service headless
+  selector:
+    app: prometheus
+  ports:
+    - port: 9090
+      targetPort: 9090
+      name: http
+    - port: 10901
+      targetPort: 10901
+      name: grpc
+    - port: 10902
+      targetPort: 10902
+      name: http2
