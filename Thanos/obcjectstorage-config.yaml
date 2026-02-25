@@ -1,0 +1,14 @@
+apiVersion: v1
+kind: Secret
+metadata:
+  name: thanos-objstore-config
+type: Opaque
+stringData:
+  objstore.yml: |
+    type: S3
+    config:
+      bucket: "prometheus-test"
+      endpoint: "minio.thanos-test.svc.cluster.local:9000"
+      access_key: "MkK9T3JipzCQUH0fHWMK"
+      secret_key: "mJLGQAqBUGRVmTZAW8SyvJXx2M8doYQfkEhTXRrL"
+      insecure: true
