@@ -1,0 +1,21 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  annotations:
+    meta.helm.sh/release-name: prometheus-stack
+    meta.helm.sh/release-namespace: monitoring
+  name: external-node-exporter
+  namespace: monitoring
+  labels:
+    release: prometheus-stack   # <-- change to YOUR Helm release label/selector
+spec:
+  namespaceSelector:
+    matchNames:
+    - monitoring
+  selector:
+    matchLabels:
+      app: external-node-exporter
+  endpoints:
+  - port: metrics
+    path: /metrics
+    interval: 30s
