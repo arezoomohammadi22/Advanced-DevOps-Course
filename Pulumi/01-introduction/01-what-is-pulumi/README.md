@@ -4,20 +4,20 @@ Pulumi is a **modern Infrastructure as Code (IaC) platform** that allows enginee
 
 With Pulumi, you can create, update, and manage cloud resources such as:
 
-- Virtual machines\
-- Kubernetes clusters\
-- Containers\
-- Databases\
-- Networking resources\
+- Virtual machines
+- Kubernetes clusters
+- Containers
+- Databases
+- Networking resources
 - Storage systems
 
 Pulumi supports major cloud providers like:
 
-- AWS\
-- Azure\
-- Google Cloud\
-- Kubernetes\
-- Cloudflare\
+- AWS
+- Azure
+- Google Cloud
+- Kubernetes
+- Cloudflare
 - DigitalOcean
 
 This makes Pulumi a powerful tool for **DevOps engineers and platform engineers** who want to manage infrastructure using real programming logic.
@@ -28,9 +28,9 @@ This makes Pulumi a powerful tool for **DevOps engineers and platform engineers*
 
 Traditional infrastructure management often involved:
 
-- Manual configuration\
-- Clicking through cloud dashboards\
-- Hard-to-reproduce environments\
+- Manual configuration
+- Clicking through cloud dashboards
+- Hard-to-reproduce environments
 - Configuration drift
 
 Infrastructure as Code solved part of this problem by allowing infrastructure to be defined as code.
@@ -39,20 +39,20 @@ However, many IaC tools like **Terraform** use **domain-specific languages (DSLs
 
 Pulumi improves this by allowing developers to use languages like:
 
-- TypeScript / JavaScript\
-- Python\
-- Go\
-- C#\
-- Java\
+- TypeScript / JavaScript
+- Python
+- Go
+- C#
+- Java
 - YAML
 
 This allows engineers to use real programming concepts such as:
 
-- Loops\
-- Functions\
-- Classes\
-- Reusable modules\
-- Libraries\
+- Loops
+- Functions
+- Classes
+- Reusable modules
+- Libraries
 - Testing frameworks
 
 ---
@@ -63,17 +63,17 @@ Infrastructure as Code means describing infrastructure using code files instead 
 
 Examples of infrastructure resources include:
 
-- Creating a Kubernetes cluster\
-- Creating an AWS S3 bucket\
-- Deploying a container\
+- Creating a Kubernetes cluster
+- Creating an AWS S3 bucket
+- Deploying a container
 - Creating a load balancer
 
 These definitions are stored in **version control systems like Git**, allowing:
 
-- Reproducibility\
-- Version tracking\
-- Collaboration\
-- Automation\
+- Reproducibility
+- Version tracking
+- Collaboration
+- Automation
 - CI/CD integration
 
 Pulumi makes this process **developer-friendly and programmable**.
@@ -84,113 +84,94 @@ Pulumi makes this process **developer-friendly and programmable**.
 
 Pulumi works by executing a **Pulumi program** that defines infrastructure resources.
 
-The workflow usually looks like this:
+Typical workflow:
 
-1\. Write infrastructure code\
-2\. Preview the changes\
-3\. Apply the changes\
-4\. Pulumi provisions resources in the cloud\
-5\. Pulumi stores the infrastructure state
+1. Write infrastructure code
+2. Preview the changes
+3. Apply the changes
+4. Pulumi provisions resources in the cloud
+5. Pulumi stores the infrastructure state
 
 Basic workflow:
 
-```text\
 Write Code → Preview Changes → Deploy Infrastructure
 
 Pulumi interacts with cloud providers through **providers and APIs**.
 
-* * * * *
+---
 
-Core Components of Pulumi
--------------------------
+## Core Components of Pulumi
 
-Pulumi has several important components.
-
-### 1\. Pulumi CLI
+### Pulumi CLI
 
 The **Pulumi CLI** is the command-line tool used to manage Pulumi projects.
 
 Common commands:
 
-pulumi new\
-pulumi preview\
-pulumi up\
-pulumi destroy\
-pulumi stack
+- pulumi new
+- pulumi preview
+- pulumi up
+- pulumi destroy
+- pulumi stack
 
-### 2\. Pulumi Project
+### Pulumi Project
 
 A **Pulumi project** is a directory containing:
 
--   Infrastructure code
-
--   Configuration files
-
--   Dependencies
+- Infrastructure code
+- Configuration files
+- Dependencies
 
 Example structure:
 
-my-project/\
-├─ Pulumi.yaml\
-├─ Pulumi.dev.yaml\
-├─ index.ts\
-└─ package.json
+my-project/
+- Pulumi.yaml
+- Pulumi.dev.yaml
+- index.ts
+- package.json
 
-### 3\. Stacks
+### Stacks
 
 A **stack** represents a deployment environment.
 
 Examples:
 
--   dev
-
--   staging
-
--   production
+- dev
+- staging
+- production
 
 Each stack has its own:
 
--   configuration
+- configuration
+- state
+- resources
 
--   state
+Example command:
 
--   resources
+pulumi stack init dev
 
-Example:
-
-pulumi stack init dev\
-pulumi stack init prod
-
-### 4\. State Management
+### State Management
 
 Pulumi keeps track of infrastructure using **state files**.
 
 State contains information about:
 
--   Created resources
-
--   Resource IDs
-
--   Dependencies
-
--   Configuration
+- Created resources
+- Resource IDs
+- Dependencies
+- Configuration
 
 State can be stored in:
 
--   Pulumi Cloud
+- Pulumi Cloud
+- AWS S3
+- Azure Blob Storage
+- Google Cloud Storage
+- Local backend
 
--   AWS S3
+---
 
--   Azure Blob Storage
-
--   Google Cloud Storage
-
--   Local backend
-
-* * * * *
-
-Example: Creating an AWS S3 Bucket
-----------------------------------
+## Example: Creating an AWS S3 Bucket
 
 Example using TypeScript:
 
@@ -200,87 +181,66 @@ const bucket = new aws.s3.Bucket("my-bucket");
 
 export const bucketName = bucket.id;
 
-When you run:
+Deploy with:
 
 pulumi up
 
 Pulumi will:
 
-1.  Analyze the code
+1. Analyze the code
+2. Compare it with the current state
+3. Create the required infrastructure
 
-2.  Compare it with the current state
+---
 
-3.  Create the required infrastructure
+## Why DevOps Engineers Like Pulumi
 
-* * * * *
-
-Why DevOps Engineers Like Pulumi
---------------------------------
-
-Pulumi has several advantages.
-
-### 1\. Real Programming Languages
+### Real Programming Languages
 
 You can use:
 
--   Loops
-
--   Conditions
-
--   Abstractions
-
--   Reusable components
+- Loops
+- Conditions
+- Abstractions
+- Reusable components
 
 Example:
 
-for i in range(3):\
+for i in range(3):
     create_server(i)
 
-### 2\. Reusable Infrastructure
+### Reusable Infrastructure
 
-You can build **components and libraries**.
+You can build **components and libraries** such as:
 
-Examples:
+- Network components
+- Kubernetes cluster components
+- Microservice deployment components
 
--   Network component
-
--   Kubernetes cluster component
-
--   Microservice deployment component
-
-### 3\. Strong Integration with Kubernetes
+### Strong Integration with Kubernetes
 
 Pulumi works extremely well with:
 
--   Kubernetes
+- Kubernetes
+- Helm
+- YAML manifests
+- Custom resources
 
--   Helm
-
--   YAML manifests
-
--   Custom resources
-
-This makes it ideal for **cloud-native environments**.
-
-### 4\. CI/CD Friendly
+### CI/CD Friendly
 
 Pulumi integrates easily with CI/CD tools like:
 
--   GitHub Actions
+- GitHub Actions
+- GitLab CI
+- Jenkins
+- ArgoCD pipelines
 
--   GitLab CI
+---
 
--   Jenkins
-
--   ArgoCD pipelines
-
-* * * * *
-
-Pulumi vs Traditional IaC Tools
--------------------------------
+## Pulumi vs Traditional IaC Tools
 
 | Feature | Pulumi | Terraform |
-| --- | --- | --- |
+|--------|--------|-----------|
 | Language | General programming languages | HCL (DSL) |
 | Logic | Full programming support | Limited |
 | Reusability | High | Medium |
@@ -289,21 +249,17 @@ Pulumi vs Traditional IaC Tools
 
 Pulumi is often preferred by **software engineers** who want infrastructure to behave like application code.
 
-* * * * *
+---
 
-Summary
--------
+## Summary
 
 Pulumi is a modern Infrastructure as Code platform that:
 
--   Uses real programming languages
-
--   Supports multiple cloud providers
-
--   Enables reusable infrastructure components
-
--   Integrates well with DevOps workflows
-
--   Simplifies cloud automation
+- Uses real programming languages
+- Supports multiple cloud providers
+- Enables reusable infrastructure components
+- Integrates well with DevOps workflows
+- Simplifies cloud automation
 
 It bridges the gap between **software development and infrastructure management**.
+
