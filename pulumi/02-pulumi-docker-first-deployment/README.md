@@ -1,1015 +1,1825 @@
-# Pulumi Installation and First Docker Deployment
+# Pulumi YAML Docker Infrastructure Lab
 
-This guide provides a complete hands-on introduction to Pulumi using TypeScript and Docker. It begins by separating the responsibilities of the Pulumi CLI, Node.js runtime, Pulumi SDK, Docker provider, and Docker Engine. It then configures a local state backend, creates a real Pulumi project and stack, deploys an Nginx container, inspects outputs and state, performs updates, creates a second environment, introduces controlled drift, reconciles the deployment, troubleshoots common failures, and removes all managed resources safely.
+This project demonstrates how to install Pulumi on Ubuntu 24.04, verify or install Docker Engine, configure a local Pulumi backend, and manage a complete Nginx service with the Pulumi Docker provider.
 
-Docker is used as the target platform because it makes the entire Pulumi lifecycle visible without requiring a public-cloud account or creating cloud costs. The same lifecycle applies later when the provider targets AWS, Azure, Google Cloud, Kubernetes, or another API-driven platform.
+The infrastructure is authored in **Pulumi YAML**. TypeScript and Python equivalents are included only to show that Pulumi can express the same resources through multiple language frontends.
 
----
+The project manages the following Docker resources:
 
-## Learning Outcomes
+- A dedicated bridge network
+- An Nginx image pulled from a registry
+- An Nginx container attached to the dedicated network
+- A configurable host-to-container port mapping
+- A read-only bind mount containing a custom web page
+- A Docker restart policy
+- Stack outputs containing the application URL and resource identifiers
 
-After completing this guide, you should be able to:
+The full lifecycle covered by this guide is:
 
-- Install and verify the Pulumi CLI on Linux, macOS, or Windows.
-- Diagnose PATH problems and distinguish them from Pulumi project or provider errors.
-- Explain the separate roles of the Pulumi CLI, Node.js runtime, Pulumi SDK, Docker provider package, provider plugin, and Docker Engine.
-- Select a Pulumi backend and explain why a local backend is useful for a lab but normally insufficient for production collaboration.
-- Create a TypeScript Pulumi project and a development stack.
-- Read the purpose of `Pulumi.yaml`, `Pulumi.<stack>.yaml`, `index.ts`, `package.json`, `package-lock.json`, and `tsconfig.json`.
-- Install and use `@pulumi/docker`.
-- Define `docker.RemoteImage` and `docker.Container` resources.
-- Use stack configuration instead of hard-coding environment-specific values.
-- Run and interpret `pulumi preview`, `pulumi up`, `pulumi refresh`, and `pulumi destroy`.
-- Distinguish create, update, replace, and delete operations.
-- Read stack outputs, Pulumi URNs, and an exported state file.
-- Create independent `dev` and `staging` stacks from one source program.
-- Simulate Docker drift and restore the declared state.
-- Apply a structured troubleshooting workflow.
-- Add the project to Git without committing generated dependencies or state exports.
-
----
-
-## Architecture of the Lab
-
-The lab has several independent layers. Understanding them prevents errors from being blamed on the wrong component.
-
-### Operating system and shell
-
-The terminal executes commands and resolves binaries through `PATH`.
-
-### Pulumi CLI
-
-The CLI finds the project, selects the active stack, connects to the backend, starts the language runtime, launches previews and updates, coordinates providers, and writes new checkpoints.
-
-### Node.js and TypeScript
-
-Node.js executes the Pulumi program. TypeScript supplies static type checking and editor assistance. npm manages language packages.
-
-### Pulumi SDK
-
-`@pulumi/pulumi` provides the core programming model: configuration, outputs, resource registration, interpolation, project and stack identity, and common resource options.
-
-### Docker provider package and provider plugin
-
-`@pulumi/docker` provides TypeScript resource classes such as `docker.RemoteImage` and `docker.Container`. During deployment, Pulumi also uses the corresponding provider plugin to communicate with Docker.
-
-### Docker Engine
-
-Docker Engine is the actual target platform. It pulls images, creates containers, assigns IDs, and applies port mappings. Pulumi does not replace Docker; it manages Docker resources through Docker's API.
-
-A failure in one layer should be tested at that layer. For example:
-
-- `pulumi: command not found` is a CLI or PATH problem.
-- A TypeScript import failure is normally a Node.js or npm dependency problem.
-- A backend passphrase error is a state/secrets-provider problem.
-- `Cannot connect to the Docker daemon` is a Docker connectivity or permission problem.
-- A container creation failure can come from Docker, the image registry, port conflicts, or provider input.
-
----
-
-## Practical Scenario
-
-The goal is to run Nginx as a Pulumi-managed resource.
-
-A manual workflow might use:
-
-```bash
-docker pull nginx:alpine
-docker run --name pulumi-nginx-dev -p 8080:80 nginx:alpine
+```text
+Environment verification
+        ↓
+Pulumi CLI installation
+        ↓
+Docker Client and Daemon verification
+        ↓
+Local Pulumi backend
+        ↓
+Pulumi YAML project and dev stack
+        ↓
+Docker Network + Remote Image + Container
+        ↓
+pulumi preview
+        ↓
+pulumi up
+        ↓
+Pulumi, Docker, and HTTP validation
+        ↓
+Configuration update and idempotency test
+        ↓
+Drift simulation, refresh, and recovery
+        ↓
+State export
+        ↓
+pulumi destroy and cleanup validation
 ```
 
-That creates a working container, but it does not provide a Pulumi stack, change preview, managed state, independent environment configuration, update history, or a consistent reconciliation workflow.
+---
 
-The Pulumi version of the deployment will define:
+## Table of Contents
 
-- An Nginx image resource
-- An Nginx container resource
-- A configurable host port
-- A configurable physical container name
-- A restart policy
-- Stack outputs for the URL and provider-assigned identifiers
-- Separate development and staging instances
+- [What This Project Teaches](#what-this-project-teaches)
+- [Architecture](#architecture)
+- [Pulumi YAML, Docker Compose, TypeScript, and Python](#pulumi-yaml-docker-compose-typescript-and-python)
+- [Requirements](#requirements)
+- [Verify the Ubuntu Environment](#verify-the-ubuntu-environment)
+- [Install Pulumi CLI](#install-pulumi-cli)
+- [Verify Docker](#verify-docker)
+- [Install Docker Engine on Ubuntu 24.04](#install-docker-engine-on-ubuntu-2404)
+- [Allow the Current User to Access Docker](#allow-the-current-user-to-access-docker)
+- [Configure a Local Pulumi Backend](#configure-a-local-pulumi-backend)
+- [Create the Pulumi YAML Project](#create-the-pulumi-yaml-project)
+- [Create the Web Content](#create-the-web-content)
+- [Configure the Stack](#configure-the-stack)
+- [Complete Pulumi YAML Program](#complete-pulumi-yaml-program)
+- [Understand the Resource Model](#understand-the-resource-model)
+- [Preview the Deployment](#preview-the-deployment)
+- [Deploy the Infrastructure](#deploy-the-infrastructure)
+- [Validate the Result](#validate-the-result)
+- [Test Idempotency](#test-idempotency)
+- [Update the Host Port](#update-the-host-port)
+- [Update the Image](#update-the-image)
+- [Understand Bind-Mount Content Changes](#understand-bind-mount-content-changes)
+- [Simulate and Repair Drift](#simulate-and-repair-drift)
+- [Export a State Backup](#export-a-state-backup)
+- [Destroy the Infrastructure](#destroy-the-infrastructure)
+- [Create a Second Stack](#create-a-second-stack)
+- [Troubleshooting](#troubleshooting)
+- [Equivalent TypeScript and Python Resources](#equivalent-typescript-and-python-resources)
+- [Security and Production Notes](#security-and-production-notes)
+- [Recommended Repository Files](#recommended-repository-files)
+- [Official Documentation](#official-documentation)
 
 ---
 
-## Prerequisites
+## What This Project Teaches
 
-Install the following:
+After completing the project, you should be able to:
 
-- Pulumi CLI
-- A supported Node.js LTS version
-- npm
-- Docker Engine or Docker Desktop
-- Git, recommended
-- A code editor, recommended
-
-Verify every layer before creating the project:
-
-```bash
-pulumi version
-node --version
-npm --version
-docker version
-docker info
-```
-
-`docker version` should normally show both client and server information. If only the client appears, or the command cannot reach the daemon, the Pulumi Docker provider will also fail. Run an additional direct Docker test:
-
-```bash
-docker ps
-```
-
-Do not continue until Docker is working independently of Pulumi.
+1. Install and verify the Pulumi CLI on Ubuntu 24.04.
+2. Verify Docker from the client, daemon, registry, and container-runtime perspectives.
+3. Explain why the Pulumi Docker provider requires access to the Docker API.
+4. Use a local backend to store Pulumi stack state.
+5. Create a Pulumi project and an independent `dev` stack.
+6. Define configuration values separately from infrastructure code.
+7. Define Docker resources in `Pulumi.yaml`.
+8. Understand dependencies created by Pulumi output references.
+9. Read the output of `pulumi preview` before applying changes.
+10. Deploy and verify a Docker network, image, container, port mapping, and bind mount.
+11. Test idempotency by running the same program multiple times.
+12. Observe update or replacement behavior after changing configuration.
+13. Simulate configuration drift by deleting a resource outside Pulumi.
+14. Reconcile recorded state with actual Docker state using `pulumi refresh`.
+15. Recreate a missing resource with `pulumi up`.
+16. Export a stack-state backup safely.
+17. Delete managed resources in dependency-aware order with `pulumi destroy`.
 
 ---
 
-## Install the Pulumi CLI
+## Architecture
 
-### Linux
+The project uses this execution path:
+
+```text
+Pulumi.yaml + Pulumi.dev.yaml
+              ↓
+       Pulumi YAML Runtime
+              ↓
+ Pulumi Engine: graph, state, and diff
+              ↓
+      Docker Provider Plugin
+              ↓
+       Docker API over socket
+              ↓
+         Docker Daemon
+              ↓
+ Network + Remote Image + Nginx Container
+              ↓
+ Host port 8080 → Container port 80
+              ↓
+       Custom read-only index.html
+```
+
+On a standard Linux Docker installation, the Docker client and the Pulumi Docker provider normally communicate with the daemon through:
+
+```text
+/var/run/docker.sock
+```
+
+Pulumi does **not** replace Docker Engine. Pulumi manages the desired lifecycle of Docker resources, while Docker Engine performs the actual image, network, container, mount, and port operations.
+
+A simplified deployment flow is:
+
+```text
+1. Pulumi CLI identifies the current project and stack.
+2. The YAML runtime reads Pulumi.yaml and stack configuration.
+3. Resources are registered with the Pulumi engine.
+4. The engine creates a dependency graph.
+5. The engine compares desired resources with recorded state.
+6. The Docker provider validates and applies Docker operations.
+7. Docker Engine creates the real resources.
+8. Provider outputs are returned to the engine.
+9. Pulumi writes a new state checkpoint.
+10. Stack outputs are displayed.
+```
+
+---
+
+## Pulumi YAML, Docker Compose, TypeScript, and Python
+
+### Pulumi YAML is not Docker Compose
+
+Both tools use YAML syntax, but they use different schemas and different lifecycle models.
+
+A Docker Compose service may look like this:
+
+```yaml
+services:
+  web:
+    image: nginx:alpine
+```
+
+A Pulumi YAML resource uses a Pulumi resource type:
+
+```yaml
+resources:
+  nginxImage:
+    type: docker:RemoteImage
+    properties:
+      name: nginx:alpine
+```
+
+With Pulumi:
+
+- Each managed object is a Pulumi resource.
+- Each resource receives a logical identity and a URN.
+- Resource inputs and outputs are stored in stack state.
+- Dependencies are derived from output references.
+- Preview, update, refresh, import, and destroy are state-aware operations.
+- A provider plugin translates Pulumi resource operations into Docker API operations.
+
+### Why use YAML here?
+
+Pulumi YAML allows infrastructure to be defined without requiring a Node.js or Python runtime for the Pulumi program itself. It is useful for teams that already understand YAML and want to begin with a declarative authoring model.
+
+The same Docker resources can also be authored with TypeScript, Python, Go, .NET, or Java. The authoring syntax changes, but the engine, state model, provider, and Docker API remain conceptually the same.
+
+---
+
+## Requirements
+
+Use an Ubuntu 24.04 LTS host with:
+
+- A regular user account
+- `sudo` access
+- Internet connectivity
+- DNS and HTTPS access
+- Enough disk space for Docker images
+- An available TCP port such as `8080`
+
+The guide assumes Bash as the shell.
+
+Docker may already be installed. If it is installed and working, skip the installation section and continue with verification.
+
+---
+
+## Verify the Ubuntu Environment
+
+Check the operating system, architecture, user, groups, and working directory:
+
+```bash
+cat /etc/os-release
+uname -m
+whoami
+id
+pwd
+```
+
+Expected observations:
+
+- `/etc/os-release` should identify Ubuntu 24.04.
+- The codename is normally `noble`.
+- `uname -m` commonly returns `x86_64` or `aarch64`.
+- `id` shows the current user's group memberships.
+
+Verify that `sudo` authentication works:
+
+```bash
+sudo -v
+```
+
+This validates credentials and refreshes the current sudo timestamp without changing infrastructure.
+
+Check outbound HTTPS access:
+
+```bash
+curl -I https://get.pulumi.com
+curl -I https://download.docker.com
+```
+
+These requests retrieve response headers only. If they fail, resolve DNS, proxy, routing, firewall, or certificate problems before continuing.
+
+---
+
+## Install Pulumi CLI
+
+Install Pulumi with the official installation script:
 
 ```bash
 curl -fsSL https://get.pulumi.com | sh
 ```
 
-The installation script normally places the CLI under `~/.pulumi/bin`. Open a new shell after installation. If the command is still unavailable, verify that the directory is in the active shell's `PATH`.
+### What this command does
 
-In a controlled organization, review remote installation scripts or install from an approved internal package repository.
+- `curl` downloads the official installation script.
+- `-f` fails on HTTP errors.
+- `-s` reduces unnecessary output.
+- `-S` still displays errors.
+- `-L` follows redirects.
+- The downloaded script is passed to the shell.
+- The installer detects the system architecture.
+- Pulumi binaries are installed under the current user's home directory, normally in `~/.pulumi/bin`.
 
-### macOS
+At this point:
+
+- No Pulumi backend has been selected.
+- No project exists.
+- No stack exists.
+- No provider has been installed or executed.
+- No Docker resource has been created.
+
+### Security note about pipe-to-shell installation
+
+Piping a downloaded script directly to a shell is convenient for a lab. In a controlled production environment, download and inspect the script first, or use official binaries and verify their published checksums.
+
+### Add Pulumi to `PATH` if required
 
 ```bash
-brew install pulumi/tap/pulumi
-pulumi version
+export PATH="$HOME/.pulumi/bin:$PATH"
+echo 'export PATH="$HOME/.pulumi/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
 ```
 
-A future upgrade can be performed through Homebrew, but team environments should use a controlled CLI version strategy rather than allowing every workstation to upgrade independently.
+The first command affects the current shell. The second persists the setting for future Bash shells. The third reloads the Bash configuration without requiring logout and login.
 
-### Windows
-
-```powershell
-winget install pulumi
-pulumi version
-```
-
-Chocolatey or the official installer can also be used where appropriate. Avoid installing Pulumi through multiple package managers on the same host because several binaries may appear in different locations.
-
-### Verify the active binary
+### Verify the installation
 
 ```bash
-# Linux or macOS
-which pulumi
+command -v pulumi
+pulumi version
+pulumi help | head -n 20
 ```
 
-```powershell
-# Windows PowerShell
-where.exe pulumi
-```
+`command -v pulumi` should return a valid executable path. The version number may differ from screenshots or classroom examples because Pulumi releases change over time.
 
-This command identifies the binary that the shell will execute. It is especially useful when the reported version is not the expected one.
+If Bash reports `pulumi: command not found`, fix `PATH`; this error is unrelated to Docker or the Docker provider.
 
 ---
 
-## Why TypeScript Is Used
+## Verify Docker
 
-Pulumi supports TypeScript/JavaScript, Python, Go, .NET, Java, and YAML. TypeScript is used here because:
+Pulumi's Docker provider requires a reachable Docker daemon. Verify the Docker client and daemon before creating a Pulumi project.
 
-- Pulumi has extensive TypeScript examples.
-- Static types catch many invalid resource inputs before deployment.
-- npm makes provider package installation explicit.
-- IDE completion makes provider schemas easier to explore.
-- The language exposes the important distinction between ordinary values and `pulumi.Output` values.
+```bash
+docker version
+sudo systemctl is-active docker
+sudo systemctl status docker --no-pager
+```
 
-The program is genuinely executed by Node.js, but it should primarily build a desired resource graph. Do not place unrelated side effects at the top level of a Pulumi program. Both preview and update execute the program, so arbitrary actions such as deleting files, modifying an external database, or sending messages could occur during preview as well.
+Interpretation:
+
+- `docker version` attempts to display both Client and Server information.
+- If only Client information appears, the CLI exists but the daemon may be stopped or inaccessible.
+- `systemctl is-active docker` should return `active`.
+- `systemctl status` provides process, startup, and recent log information.
+
+Perform an end-to-end Docker test:
+
+```bash
+docker info
+docker run --rm hello-world
+```
+
+A successful `hello-world` run validates the complete path:
+
+```text
+Docker CLI
+   ↓
+Docker socket
+   ↓
+Docker daemon
+   ↓
+Registry access
+   ↓
+Image pull
+   ↓
+Container creation
+   ↓
+Container runtime execution
+```
+
+The `--rm` option removes the temporary container after it exits.
+
+If you receive a socket permission error, continue to [Allow the Current User to Access Docker](#allow-the-current-user-to-access-docker).
 
 ---
 
-## Select a State Backend
+## Install Docker Engine on Ubuntu 24.04
 
-Pulumi stores a checkpoint for every stack. The checkpoint contains resource identities, inputs, outputs, dependencies, provider references, and the result of the last managed operation.
+Skip this section when Docker Engine is already installed and healthy.
 
-Common backend choices include:
+Remove packages that can conflict with Docker's official packages:
 
-- Pulumi Cloud
-- Local filesystem
-- Object storage such as S3-compatible storage
-- Other supported self-managed backends
+```bash
+sudo apt remove -y \
+  docker.io \
+  docker-compose \
+  docker-compose-v2 \
+  docker-doc \
+  podman-docker \
+  containerd \
+  runc || true
+```
 
-Pulumi Cloud is designed for team collaboration and can provide managed history, locking, access control, and visibility. A self-managed backend gives the organization more operational responsibility. A local backend is convenient for this isolated lab because it requires no external account, but it does not automatically provide team locking, shared access control, backup, or disaster recovery.
+Removing conflicting packages does not automatically remove Docker data under `/var/lib/docker`. However, do not perform package replacement on a production host without understanding the existing installation and creating appropriate backups.
 
-Connect the CLI to the local backend:
+Install prerequisites:
+
+```bash
+sudo apt update
+sudo apt install -y ca-certificates curl
+```
+
+Create the keyring directory and install Docker's repository key:
+
+```bash
+sudo install -m 0755 -d /etc/apt/keyrings
+sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+  -o /etc/apt/keyrings/docker.asc
+sudo chmod a+r /etc/apt/keyrings/docker.asc
+```
+
+Add Docker's official APT source:
+
+```bash
+sudo tee /etc/apt/sources.list.d/docker.sources > /dev/null <<EOF
+Types: deb
+URIs: https://download.docker.com/linux/ubuntu
+Suites: $(. /etc/os-release && echo "${UBUNTU_CODENAME:-$VERSION_CODENAME}")
+Components: stable
+Architectures: $(dpkg --print-architecture)
+Signed-By: /etc/apt/keyrings/docker.asc
+EOF
+```
+
+Install Docker Engine and related plugins:
+
+```bash
+sudo apt update
+sudo apt install -y \
+  docker-ce \
+  docker-ce-cli \
+  containerd.io \
+  docker-buildx-plugin \
+  docker-compose-plugin
+```
+
+Enable and start Docker:
+
+```bash
+sudo systemctl enable --now docker
+sudo systemctl is-active docker
+```
+
+Run a privileged verification test before changing user permissions:
+
+```bash
+sudo docker run --rm hello-world
+```
+
+---
+
+## Allow the Current User to Access Docker
+
+The Pulumi CLI should normally be executed as the regular project user, not with `sudo`. The Docker provider therefore needs that user to be able to access the Docker socket.
+
+Create or locate the Docker group and add the current user:
+
+```bash
+getent group docker || sudo groupadd docker
+sudo usermod -aG docker "$USER"
+```
+
+Apply the new group membership either by logging out and back in, or by starting a shell with the new primary group:
+
+```bash
+newgrp docker
+```
+
+Test Docker without `sudo`:
+
+```bash
+docker run --rm hello-world
+```
+
+Inspect the socket and user groups:
+
+```bash
+ls -l /var/run/docker.sock
+id
+docker info --format 'Server Version: {{.ServerVersion}}'
+```
+
+Typical socket ownership is:
+
+```text
+root:docker
+```
+
+The current user should appear as a member of the `docker` group.
+
+> **Important:** Membership in the `docker` group is effectively root-equivalent access to the host. A user with Docker access can create privileged containers or mount sensitive host paths. Use this setup only when it matches your security model. Evaluate Rootless Docker or stricter access controls for production systems.
+
+Avoid running normal Pulumi commands with `sudo`. Doing so can create root-owned state, plugin, or project files and can make later non-root operation confusing.
+
+---
+
+## Configure a Local Pulumi Backend
+
+Pulumi requires state to track managed resources. State includes:
+
+- Resource URNs
+- Provider resource IDs
+- Inputs and outputs
+- Dependencies
+- Stack outputs
+- The last successful checkpoint
+
+Use a local file-based backend for this lab:
 
 ```bash
 pulumi login --local
-pulumi whoami -v
+pulumi whoami
 ```
 
-`pulumi whoami -v` verifies the current backend URL as well as the active identity/context.
+This command selects the local backend for stacks created afterward. It does not create any Docker resource.
 
-> Treat backend selection as part of infrastructure architecture. If local state files are deleted, the Docker container may still exist while Pulumi loses its management history. Production state requires secure storage, encryption, backup, access control, concurrency protection, and a tested recovery procedure.
-
-### Passphrase consideration
-
-A local stack may use a passphrase-based secrets provider. Store the passphrase in a password manager. Losing it can make encrypted stack configuration unusable even when the state files still exist.
-
----
-
-## Create the Project
-
-```bash
-mkdir pulumi-docker-lab
-cd pulumi-docker-lab
-pulumi new typescript
-```
-
-Use values similar to:
-
-- Project name: `pulumi-docker-lab`
-- Description: `First Pulumi Docker hands-on project`
-- Stack name: `dev`
-
-The command creates the project files and installs initial Node.js dependencies.
-
-Expected structure:
+Conceptually:
 
 ```text
-pulumi-docker-lab/
-├── Pulumi.yaml
-├── Pulumi.dev.yaml
-├── index.ts
-├── package.json
-├── package-lock.json
-├── tsconfig.json
-└── node_modules/
+Pulumi CLI
+    ↓
+pulumi login --local
+    ↓
+Local state backend
+    ↓
+Project and stack checkpoints
+    ↓
+Docker IDs, inputs, outputs, and dependencies
 ```
 
-The exact template can vary by CLI version, but the responsibilities remain the same.
+### Passphrase note
+
+A local backend commonly uses a passphrase-based secrets provider. Pulumi may request a passphrase when creating a stack. Store it securely. Even when this project contains no real secret, the stack still has a secrets-provider configuration.
+
+A local backend is suitable for learning and single-user experiments. A team environment normally requires a shared backend, backups, access control, concurrency protection, and an operational recovery plan.
 
 ---
 
-## Understand the Project Files
+## Create the Pulumi YAML Project
 
-### `Pulumi.yaml`
-
-```yaml
-name: pulumi-docker-lab
-runtime: nodejs
-description: First Pulumi Docker hands-on project
-```
-
-- `name` defines project identity.
-- `runtime` tells Pulumi to execute the program using Node.js.
-- `description` documents the project.
-
-This file describes the project itself, not one environment.
-
-### `Pulumi.dev.yaml`
-
-This is the settings file for the `dev` stack. Values written with `pulumi config set` are stored here, using project-scoped keys by default. A future `staging` stack will have separate configuration, usually in `Pulumi.staging.yaml`.
-
-### `index.ts`
-
-This is the default TypeScript entry point. It executes during both preview and update and registers resources with the Pulumi engine.
-
-### `package.json`
-
-This file declares Node.js dependencies and scripts.
-
-### `package-lock.json`
-
-The lockfile records the exact dependency graph. Commit it to improve reproducibility. A provider upgrade should be a reviewable change because new versions can alter schemas, defaults, or diff behavior.
-
-### `tsconfig.json`
-
-This file configures TypeScript compilation.
-
-### `node_modules/`
-
-This directory contains installed packages and should not be committed. It can be rebuilt from `package-lock.json` using `npm ci`.
-
-### Verify the active stack
+Create the project directory:
 
 ```bash
-pulumi stack
+mkdir -p ~/labs/pulumi-docker-yaml-lab
+cd ~/labs/pulumi-docker-yaml-lab
+```
+
+Create a Pulumi YAML project and the initial `dev` stack:
+
+```bash
+pulumi new yaml \
+  --name pulumi-docker-yaml-lab \
+  --description "Docker infrastructure with Pulumi YAML" \
+  --stack dev
+```
+
+If the command runs interactively, use:
+
+- Project name: `pulumi-docker-yaml-lab`
+- Description: `Docker infrastructure with Pulumi YAML`
+- Stack name: `dev`
+
+If a passphrase is requested, choose one for the lab and store it safely.
+
+Verify the generated project:
+
+```bash
+pwd
+ls -la
+cat Pulumi.yaml
 pulumi stack ls
-```
-
-Always verify the active stack before preview, update, refresh, or destroy. Running a correct command against the wrong environment is a common and serious operational failure.
-
----
-
-## Install the Docker Provider
-
-```bash
-npm install @pulumi/docker
-```
-
-Verify the core and Docker packages:
-
-```bash
-npm list @pulumi/pulumi
-npm list @pulumi/docker
-```
-
-The package changes should appear in `package.json` and `package-lock.json`.
-
----
-
-## Write the Initial Pulumi Program
-
-Replace `index.ts` with the following:
-
-```typescript
-import * as pulumi from "@pulumi/pulumi";
-import * as docker from "@pulumi/docker";
-
-const config = new pulumi.Config();
-
-const hostPort = config.getNumber("hostPort") ?? 8080;
-const containerName =
-    config.get("containerName") ?? `pulumi-nginx-${pulumi.getStack()}`;
-
-const nginxImage = new docker.RemoteImage("nginxImage", {
-    name: "nginx:alpine",
-    keepLocally: true,
-});
-
-const nginxContainer = new docker.Container("nginxContainer", {
-    name: containerName,
-    image: nginxImage.imageId,
-    ports: [
-        {
-            internal: 80,
-            external: hostPort,
-            protocol: "tcp",
-        },
-    ],
-    restart: "unless-stopped",
-});
-
-export const url = pulumi.interpolate`http://localhost:${hostPort}`;
-export const containerId = nginxContainer.id;
-export const imageId = nginxImage.imageId;
-```
-
----
-
-## Analyze the Program
-
-### Imports
-
-```typescript
-import * as pulumi from "@pulumi/pulumi";
-import * as docker from "@pulumi/docker";
-```
-
-The first package supplies the core Pulumi model. The second supplies Docker resource classes.
-
-### Stack configuration
-
-```typescript
-const config = new pulumi.Config();
-
-const hostPort = config.getNumber("hostPort") ?? 8080;
-const containerName =
-    config.get("containerName") ?? `pulumi-nginx-${pulumi.getStack()}`;
-```
-
-`getNumber` and `get` return optional values. The nullish-coalescing operator supplies defaults when no stack value exists.
-
-`pulumi.getStack()` returns the current stack name. It helps produce a default physical container name that is different for `dev` and `staging`.
-
-### Image resource
-
-```typescript
-const nginxImage = new docker.RemoteImage("nginxImage", {
-    name: "nginx:alpine",
-    keepLocally: true,
-});
-```
-
-- `nginxImage` is the Pulumi logical name.
-- `name` is the Docker image reference.
-- `keepLocally` prevents Pulumi from removing the local image during resource deletion.
-
-The Pulumi logical name is not the Docker image ID. Pulumi uses logical identity to track the resource in state.
-
-### Container resource
-
-```typescript
-const nginxContainer = new docker.Container("nginxContainer", {
-    name: containerName,
-    image: nginxImage.imageId,
-    ports: [
-        {
-            internal: 80,
-            external: hostPort,
-            protocol: "tcp",
-        },
-    ],
-    restart: "unless-stopped",
-});
-```
-
-The container input uses `nginxImage.imageId`, which is a provider output. This creates an implicit dependency: the container cannot be created until the image has been resolved or pulled and its ID is known.
-
-The engine builds a dependency graph from these relationships. Source-code line order alone is not the complete execution model.
-
-### Stack outputs
-
-```typescript
-export const url = pulumi.interpolate`http://localhost:${hostPort}`;
-export const containerId = nginxContainer.id;
-export const imageId = nginxImage.imageId;
-```
-
-Exports become stack outputs. They are stored as part of the stack contract and can be read by operators, CI pipelines, or another stack. `pulumi.interpolate` safely constructs a string that can include Pulumi-managed output values.
-
----
-
-## Configure the Development Stack
-
-```bash
 pulumi stack
-pulumi config set hostPort 8080
-pulumi config set containerName pulumi-nginx-dev
-pulumi config
 ```
 
-The stack settings file should contain values similar to:
+At this stage:
+
+- `Pulumi.yaml` should exist in the project root.
+- `runtime: yaml` tells Pulumi to use the YAML runtime.
+- The `dev` stack exists.
+- No custom Docker resource has been deployed yet.
+
+### Project and stack relationship
+
+A **project** represents the infrastructure program, commonly stored in one repository.
+
+A **stack** is an independently configured and independently stateful instance of that project. The same project can be deployed as:
+
+```text
+dev
+staging
+production
+```
+
+Each stack can have different ports, names, image tags, paths, and secrets.
+
+---
+
+## Create the Web Content
+
+Create the bind-mounted Nginx content:
+
+```bash
+mkdir -p html
+
+cat > html/index.html <<'EOF'
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Pulumi Docker YAML Lab</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      max-width: 760px;
+      margin: 80px auto;
+    }
+
+    code {
+      background: #eef2f5;
+      padding: 3px 6px;
+    }
+  </style>
+</head>
+<body>
+  <h1>Hello from Pulumi YAML</h1>
+  <p>This Nginx container is managed by Pulumi.</p>
+  <p>Provider: <code>docker</code> | Stack: <code>dev</code></p>
+</body>
+</html>
+EOF
+```
+
+List project files:
+
+```bash
+find . -maxdepth 2 -type f -print
+```
+
+Verify that the file is readable:
+
+```bash
+cat html/index.html
+test -r html/index.html && echo "HTML file is readable"
+```
+
+At this point Nginx is not running, so an HTTP request to the future application port should not yet return the application page.
+
+The HTML file is application content, not a separate Pulumi resource. Pulumi will configure Docker to mount its directory into the container.
+
+---
+
+## Configure the Stack
+
+The program will support four configuration values:
+
+| Configuration | Type | Purpose | Default |
+|---|---:|---|---|
+| `appName` | string | Physical naming prefix | `pulumi-nginx` |
+| `imageName` | string | Nginx image reference | `nginx:alpine` |
+| `hostPort` | integer | Published port on the Ubuntu host | `8080` |
+| `webRoot` | string | Absolute host path mounted into Nginx | Required |
+
+Store stack-specific values:
+
+```bash
+pulumi config set webRoot "$(pwd)/html"
+pulumi config set hostPort 8080
+```
+
+Inspect configuration:
+
+```bash
+pulumi config
+cat Pulumi.dev.yaml
+```
+
+`pulumi config set` updates configuration for the currently selected stack. It does not execute the infrastructure program and does not change Docker resources.
+
+The stack file may contain namespaced keys similar to:
 
 ```yaml
 config:
-  pulumi-docker-lab:hostPort: "8080"
-  pulumi-docker-lab:containerName: pulumi-nginx-dev
+  pulumi-docker-yaml-lab:hostPort: "8080"
+  pulumi-docker-yaml-lab:webRoot: /home/example/labs/pulumi-docker-yaml-lab/html
 ```
 
-The values are namespaced by the project name. This reduces collisions when multiple components or providers define similarly named configuration keys.
+The exact path depends on the current user's home directory.
 
-Do not edit encrypted secret ciphertext manually. For ordinary configuration, the CLI is still preferred because it applies correct namespacing and type handling.
+`webRoot` must be an absolute path because Docker bind mounts resolve paths on the Docker host.
 
 ---
 
-## Run the First Preview
+## Complete Pulumi YAML Program
+
+Replace the generated `Pulumi.yaml` with the complete program:
 
 ```bash
-pulumi preview --diff
+cat > Pulumi.yaml <<'EOF'
+name: pulumi-docker-yaml-lab
+runtime: yaml
+description: Docker infrastructure managed with Pulumi YAML
+
+config:
+  appName:
+    type: string
+    default: pulumi-nginx
+
+  imageName:
+    type: string
+    default: nginx:alpine
+
+  hostPort:
+    type: integer
+    default: 8080
+
+  webRoot:
+    type: string
+
+resources:
+  appNetwork:
+    type: docker:Network
+    properties:
+      name: ${appName}-network
+      driver: bridge
+
+  nginxImage:
+    type: docker:RemoteImage
+    properties:
+      name: ${imageName}
+      keepLocally: false
+
+  webContainer:
+    type: docker:Container
+    properties:
+      name: ${appName}
+      image: ${nginxImage.imageId}
+      restart: unless-stopped
+      envs:
+        - APP_ENV=training
+      networksAdvanced:
+        - name: ${appNetwork.name}
+          aliases:
+            - web
+      ports:
+        - internal: 80
+          external: ${hostPort}
+          ip: 0.0.0.0
+          protocol: tcp
+      volumes:
+        - hostPath: ${webRoot}
+          containerPath: /usr/share/nginx/html
+          readOnly: true
+
+outputs:
+  applicationUrl: http://localhost:${hostPort}
+  containerName: ${webContainer.name}
+  containerId: ${webContainer.id}
+  imageId: ${nginxImage.imageId}
+  networkName: ${appNetwork.name}
+EOF
 ```
 
-The program executes, but Pulumi does not intentionally create the image or container during preview. The engine loads the empty or initial stack checkpoint, receives two resource declarations, calculates dependencies, asks the Docker provider for differences, and shows the proposed plan.
+Review the final file:
 
-Expected operations include creation of:
+```bash
+sed -n '1,220p' Pulumi.yaml
+```
 
-- The Docker provider resource used internally by Pulumi
-- `docker:index/remoteImage:RemoteImage`
-- `docker:index/container:Container`
-
-Review more than the summary count. Check:
-
-- Resource types
-- Logical names
-- Image name
-- Container name
-- Port mapping
-- Replacement indicators
-- Deletes
-- Sensitive or unexpected properties
-
-A preview only improves safety when it is read.
+YAML is indentation-sensitive. Use spaces, not tab characters.
 
 ---
 
-## Deploy the Resources
+## Understand the Resource Model
 
-```bash
-pulumi up --diff
+### Project metadata and runtime
+
+```yaml
+name: pulumi-docker-yaml-lab
+runtime: yaml
 ```
 
-`pulumi up` shows the plan again, asks for confirmation in interactive mode, then executes provider operations according to the dependency graph.
+- `name` identifies the Pulumi project.
+- The project name becomes part of resource URNs.
+- `runtime: yaml` selects the Pulumi YAML runtime.
+- The YAML program does not require a Node.js or Python runtime.
 
-Typical flow:
+### Configuration declarations
 
-1. Resolve or pull the Nginx image.
-2. Receive the image ID.
-3. Create the container using that ID.
-4. Write the new stack checkpoint.
-5. Display stack outputs.
+```yaml
+config:
+  appName:
+    type: string
+    default: pulumi-nginx
+```
 
-The first image pull can take longer. If the operation fails, inspect the provider diagnostic and test the lower layer directly. For example, verify that Docker itself can reach the registry.
+The `config` section declares accepted program configuration. Defaults are used unless the current stack overrides them.
 
-Do not run concurrent updates against the same local stack. A shared production backend should provide appropriate concurrency controls.
+`webRoot` has no default and is therefore required. A missing value should cause preview to fail instead of deploying an invalid mount.
+
+### Docker network
+
+```yaml
+appNetwork:
+  type: docker:Network
+  properties:
+    name: ${appName}-network
+    driver: bridge
+```
+
+- `appNetwork` is the **logical name** inside the Pulumi program.
+- `${appName}-network` becomes the **physical Docker network name**.
+- `docker:Network` selects the Docker provider's Network resource.
+- `bridge` creates a private network on the local Docker host.
+
+Changing a Pulumi logical name can change resource identity. Without an alias, Pulumi may interpret the renamed logical resource as a new resource even when the physical name remains similar.
+
+### Remote image
+
+```yaml
+nginxImage:
+  type: docker:RemoteImage
+  properties:
+    name: ${imageName}
+    keepLocally: false
+```
+
+The remote image resource manages an image on the Docker host.
+
+- The default image reference is `nginx:alpine`.
+- The provider pulls the image when required.
+- `imageId` is an output produced by the provider.
+- `keepLocally: false` allows removal during destroy when Docker and provider constraints permit it.
+
+An image can remain on the host when it is still referenced or used elsewhere. Always inspect the actual destroy output.
+
+### Container identity and dependency on the image
+
+```yaml
+webContainer:
+  type: docker:Container
+  properties:
+    name: ${appName}
+    image: ${nginxImage.imageId}
+```
+
+`${nginxImage.imageId}` serves two purposes:
+
+1. It passes the exact image identifier to the container.
+2. It creates a dependency from the container to the image resource.
+
+The engine therefore knows that the container cannot be created until the image output is available.
+
+### Restart policy
+
+```yaml
+restart: unless-stopped
+```
+
+Docker Engine enforces the restart policy. Pulumi does not run a continuous monitoring loop for this behavior.
+
+### Environment variables
+
+```yaml
+envs:
+  - APP_ENV=training
+```
+
+This configures an environment variable inside the container. It can be inspected later through `docker inspect`.
+
+### Network attachment and alias
+
+```yaml
+networksAdvanced:
+  - name: ${appNetwork.name}
+    aliases:
+      - web
+```
+
+The container depends on the network because it references `${appNetwork.name}`.
+
+The alias `web` can be resolved by other containers attached to the same Docker network. This project uses one container, but the alias demonstrates Docker network service discovery.
+
+### Port mapping
+
+```yaml
+ports:
+  - internal: 80
+    external: ${hostPort}
+    ip: 0.0.0.0
+    protocol: tcp
+```
+
+- Nginx listens on port `80` inside the container.
+- `${hostPort}` is published on the Ubuntu host.
+- `0.0.0.0` binds the port on all IPv4 interfaces.
+- The protocol is TCP.
+
+For a host-local-only service, consider binding to `127.0.0.1`. When using `0.0.0.0` on a remote server, review host firewall and cloud security-group rules.
+
+### Read-only bind mount
+
+```yaml
+volumes:
+  - hostPath: ${webRoot}
+    containerPath: /usr/share/nginx/html
+    readOnly: true
+```
+
+Docker mounts the host directory directly into Nginx's document root.
+
+- Pulumi does not copy `index.html` into the container.
+- Docker configures the bind mount at container creation.
+- `readOnly: true` prevents the container from modifying the host directory through this mount.
+
+### Stack outputs
+
+```yaml
+outputs:
+  applicationUrl: http://localhost:${hostPort}
+  containerName: ${webContainer.name}
+  containerId: ${webContainer.id}
+  imageId: ${nginxImage.imageId}
+  networkName: ${appNetwork.name}
+```
+
+Some outputs are known from configuration. Provider-generated outputs such as resource IDs remain unknown until creation is complete. After a successful update, Pulumi stores them in stack state.
 
 ---
 
-## Validate the Deployment Outside Pulumi
+## Preview the Deployment
 
-Do not rely only on the IaC tool. Verify the real target platform:
+Run a preview before changing Docker:
 
 ```bash
-docker ps --filter name=pulumi-nginx-dev
-docker inspect pulumi-nginx-dev
-curl http://localhost:8080
+pulumi preview
 ```
 
-You can also open:
+The preview flow is:
 
 ```text
-http://localhost:8080
+Load Pulumi.yaml and Pulumi.dev.yaml
+             ↓
+Resolve configuration and expressions
+             ↓
+Register Network, RemoteImage, and Container
+             ↓
+Build the dependency graph
+             ↓
+Load current stack state
+             ↓
+Ask the Docker provider to validate and calculate differences
+             ↓
+Display Create, Update, Replace, or Delete operations
 ```
 
-The default Nginx page confirms that the Docker resource exists and the port mapping works.
+For a new stack, expect create operations for:
 
-Read stack outputs:
+- `docker:Network`
+- `docker:RemoteImage`
+- `docker:Container`
 
-```bash
-pulumi stack output
-pulumi stack output url
-pulumi stack output containerId
-```
+You may also see the Pulumi stack resource in the graph.
 
-A stack output is more than a log line. It is stored in state and can be consumed by automation. Sensitive outputs should be marked as secrets.
+Preview is a plan, not the final deployment. Provider plugins may still be downloaded, and providers may perform limited reads or validation. Preview should not be treated as a completely offline parser.
 
----
-
-## Inspect Pulumi Resource Identity and State
-
-Display resource URNs:
+Inspect installed plugins and the current stack:
 
 ```bash
+pulumi plugin ls
 pulumi stack --show-urns
 ```
 
-A Pulumi URN normally contains stack, project, type, and logical resource name. It is different from the Docker container ID.
+After preview alone, the three Docker resources should not yet be recorded as successfully created.
 
-Export the stack state for educational inspection:
+### Common preview failures
 
-```bash
-pulumi stack export --file dev-state.json
-```
+- Docker socket permission denied
+- Required `webRoot` configuration missing
+- Invalid YAML indentation
+- Invalid provider property
+- Plugin download failure
+- Registry or Internet connectivity problems
+- Invalid path or unavailable host environment
 
-Open `dev-state.json` and locate the image and container resources. Notice that state contains more than names:
-
-- Inputs
-- Outputs
-- Dependencies
-- Provider references
-- URNs
-- Physical IDs
-- Metadata
-
-Do not commit this export. State can contain sensitive operational data. Manual state editing is an advanced and risky operation. Delete the file after inspection or add it to `.gitignore`.
+Read the first meaningful error message before proceeding to `pulumi up`.
 
 ---
 
-## Change the Host Port
+## Deploy the Infrastructure
 
-Change development from port `8080` to `8081` without editing source code:
+Apply the desired state:
+
+```bash
+pulumi up
+```
+
+Pulumi reruns the program, calculates a plan, and asks for confirmation. Review the resource summary and confirm the update.
+
+### What happens behind the scenes
+
+1. The CLI identifies the current project and selected stack.
+2. The engine reads the previous checkpoint from the local backend.
+3. The YAML runtime resolves stack configuration.
+4. The runtime sends resource registrations to the engine.
+5. The engine creates URNs from stack, project, type, and logical name.
+6. The engine builds the dependency graph.
+7. The Docker provider sends a network-create request to the Docker API.
+8. The Docker provider pulls or reads the configured image.
+9. The provider returns the image ID to the engine.
+10. The engine resolves the container's image and network inputs.
+11. The provider asks Docker Engine to create the container.
+12. Docker configures the network attachment, environment, restart policy, port binding, and bind mount.
+13. Docker starts Nginx inside the container.
+14. The provider returns the container ID and other outputs.
+15. Pulumi writes a successful state checkpoint.
+16. Stack outputs are printed.
+
+The network and image do not depend on each other, so the engine may process them in parallel. The container depends on both and must wait for their outputs.
+
+Pulumi Engine does not simply execute a hidden `docker run` command. It sends typed resource operations to the Docker provider, which communicates with the Docker API.
+
+---
+
+## Validate the Result
+
+Do not accept a deployment only because `pulumi up` reports success. Validate it from three independent perspectives.
+
+### 1. Validate Pulumi state and outputs
+
+```bash
+pulumi stack
+pulumi stack output
+pulumi stack output applicationUrl
+pulumi stack --show-ids --show-urns
+```
+
+These commands verify that Pulumi recorded the update, resource identities, and outputs.
+
+### 2. Validate Docker resources
+
+```bash
+docker ps --filter name=pulumi-nginx
+docker image ls nginx
+docker network ls --filter name=pulumi-nginx-network
+docker inspect pulumi-nginx
+docker network inspect pulumi-nginx-network
+```
+
+Inspect specific properties:
+
+```bash
+docker inspect pulumi-nginx \
+  --format '{{json .HostConfig.RestartPolicy}}'
+
+docker inspect pulumi-nginx \
+  --format '{{json .Mounts}}'
+
+docker inspect pulumi-nginx \
+  --format '{{json .NetworkSettings.Ports}}'
+```
+
+You should confirm:
+
+- The container is in the `Up` state.
+- The Nginx image exists.
+- The custom bridge network exists.
+- The container is attached to that network.
+- Port `8080` maps to container port `80/tcp`.
+- The host HTML directory is mounted read-only.
+- The restart policy is `unless-stopped`.
+
+### 3. Validate the application over HTTP
+
+```bash
+curl -i http://127.0.0.1:8080
+```
+
+Perform an assertion-style test:
+
+```bash
+curl -fsS http://127.0.0.1:8080 \
+  | grep "Hello from Pulumi YAML"
+```
+
+A successful response verifies the complete application path:
+
+```text
+Host TCP port
+   ↓
+Docker port publishing
+   ↓
+Container network namespace
+   ↓
+Nginx process
+   ↓
+Read-only bind-mounted index.html
+```
+
+A valid result requires all of the following:
+
+- Pulumi lists the managed resources.
+- Docker shows the container in the `Up` state.
+- The network contains the container.
+- The port mapping is correct.
+- HTTP returns the custom page.
+
+---
+
+## Test Idempotency
+
+Run the same desired state again without changing the program or configuration:
+
+```bash
+pulumi preview
+pulumi up
+```
+
+Expected result:
+
+```text
+No changes
+```
+
+Pulumi matches the current registrations with existing resource URNs and recorded state. The provider finds no effective difference, so Pulumi should not create duplicate containers or networks.
+
+Verify that only one matching container exists:
+
+```bash
+docker ps -a \
+  --filter name=pulumi-nginx \
+  --format 'table {{.ID}}\t{{.Names}}\t{{.Status}}'
+```
+
+This demonstrates that Pulumi is not a shell script that blindly creates new resources each time it runs.
+
+---
+
+## Update the Host Port
+
+Change the `dev` stack's host port from `8080` to `8081`:
 
 ```bash
 pulumi config set hostPort 8081
-pulumi preview --diff
+pulumi preview
 ```
 
-Inspect whether the Docker provider reports an in-place update or a replacement. Container port mappings commonly require recreation because Docker cannot modify every container property in place.
+Read the preview carefully. Docker port bindings are part of container creation configuration, so the provider may require replacement of the container. The preview is the authoritative source.
 
-A replacement can create downtime. In a local lab the impact is minor, but in production it requires planning around traffic, health checks, load balancers, rollout strategy, and stateful data.
+Typical desired behavior:
+
+- The network remains unchanged.
+- The image remains unchanged.
+- The container is updated or replaced.
+- The new stack output uses port `8081`.
 
 Apply the change:
 
 ```bash
-pulumi up --diff
-curl http://localhost:8081
-curl http://localhost:8080
+pulumi up
 ```
 
-The new port should respond and the old port should no longer serve the same container.
+Validate the new port:
 
-Test idempotency:
+```bash
+curl -fsS http://127.0.0.1:8081 \
+  | grep "Hello from Pulumi YAML"
+```
+
+Verify that the previous port no longer responds:
+
+```bash
+! curl -fsS http://127.0.0.1:8080 >/dev/null
+```
+
+Check the updated output:
+
+```bash
+pulumi stack output applicationUrl
+```
+
+This experiment demonstrates minimal change: Pulumi changes only resources affected by the new input.
+
+---
+
+## Update the Image
+
+Change the image configuration:
+
+```bash
+pulumi config set imageName nginx:stable-alpine
+pulumi preview
+pulumi up
+```
+
+Changing the image reference affects the `RemoteImage` resource. A new image ID can then propagate into the container because the container uses:
+
+```yaml
+image: ${nginxImage.imageId}
+```
+
+This demonstrates that dependencies are not only about creation order. A changed output can also trigger an update or replacement in a dependent resource.
+
+Verify the configured image:
+
+```bash
+docker inspect pulumi-nginx --format '{{.Config.Image}}'
+docker image ls nginx
+```
+
+---
+
+## Understand Bind-Mount Content Changes
+
+Modify the file mounted into Nginx:
+
+```bash
+sed -i \
+  's/Hello from Pulumi YAML/Updated without replacing the container/' \
+  html/index.html
+```
+
+Test the page:
+
+```bash
+curl -fsS http://127.0.0.1:8081 \
+  | grep 'Updated without replacing the container'
+```
+
+Run a preview:
 
 ```bash
 pulumi preview
 ```
 
-With no further code, configuration, or external changes, the preview should report no changes.
+Pulumi will normally show no infrastructure change because the container input contains the **path** of the bind mount, not a hash of the directory contents.
+
+The file changes immediately inside the running container because Docker exposes the host directory directly.
+
+This is an important ownership boundary:
+
+- Pulumi manages the mount configuration.
+- Docker provides the bind mount.
+- The current program does not version or hash the mounted files.
+
+For immutable content delivery, build a custom image or introduce an explicit content-version trigger.
 
 ---
 
-## Change the Image and Understand Mutable Tags
+## Simulate and Repair Drift
 
-Temporarily modify the image resource:
-
-```typescript
-const nginxImage = new docker.RemoteImage("nginxImage", {
-    name: "nginx:stable-alpine",
-    keepLocally: true,
-});
-```
-
-Then run:
+Create drift by deleting the container outside Pulumi:
 
 ```bash
-pulumi preview --diff
-pulumi up --diff
+docker rm -f pulumi-nginx
 ```
 
-Because the container depends on `imageId`, an image identity change can also affect the container.
-
-Tags such as `alpine`, `stable-alpine`, and `latest` are mutable. The registry may point the same tag to a new image while source code remains unchanged. For production reproducibility, prefer a controlled version or digest and make image upgrades explicit, reviewed changes.
-
-Provider behavior for re-pulling a mutable tag can depend on resource options and provider implementation. Do not assume a tag is automatically re-resolved on every preview.
-
----
-
-## Create an Independent Staging Stack
-
-The same source code can create another environment with separate state and configuration. Avoid host conflicts by using a different port and container name.
-
-```bash
-pulumi stack init staging
-pulumi config set hostPort 8082
-pulumi config set containerName pulumi-nginx-staging
-pulumi stack
-pulumi preview --diff
-pulumi up --diff
-```
-
-Creating the stack makes it active. Development configuration is not automatically copied.
-
-Verify both environments:
-
-```bash
-pulumi stack ls
-docker ps --filter name=pulumi-nginx
-curl http://localhost:8081
-curl http://localhost:8082
-```
-
-The important model is:
-
-- One project and one source program
-- Two independent stacks
-- Two independent checkpoints
-- Two independent configuration sets
-- Two real Docker containers
-
-A source-code commit does not automatically update every stack. Each stack changes only when the deployment workflow targets it.
-
----
-
-## Introduce Controlled Drift
-
-Return to development:
-
-```bash
-pulumi stack select dev
-docker stop pulumi-nginx-dev
-docker ps -a --filter name=pulumi-nginx-dev
-```
-
-The live container is now stopped, while the program and previously recorded state still represent the declared container resource.
-
-Run a normal preview, then refresh:
-
-```bash
-pulumi preview
-pulumi refresh --diff
-```
-
-A normal preview may not discover every live change because Pulumi does not necessarily perform a full provider refresh before every operation. A refresh explicitly reads live provider state and updates the recorded checkpoint.
-
-After reviewing the refreshed state, reconcile the environment:
-
-```bash
-pulumi preview --diff
-pulumi up --diff
-docker ps --filter name=pulumi-nginx-dev
-```
-
-### More severe drift: external deletion
-
-Delete the development container outside Pulumi:
-
-```bash
-docker rm -f pulumi-nginx-dev
-pulumi refresh --diff
-pulumi preview --diff
-pulumi up --diff
-```
-
-Pulumi should detect the missing resource and recreate it during the update.
-
-> Drift requires a decision. **Remediation** returns live state to code. **Adoption** changes code and state to accept the external change. Do not run refresh or update blindly in an incident because you may erase a valid emergency change or permanently accept an unauthorized one.
-
----
-
-## Understand Create, Update, Replace, and Delete
-
-### Create
-
-Occurs when a declared resource has no managed state entry, such as the first deployment or a new stack.
-
-### Update
-
-Occurs when the provider can modify a property in place.
-
-### Replace
-
-Occurs when a changed property cannot be updated in place or the provider schema marks it as replacement-only. Replacement can mean create-before-delete or delete-before-create depending on resource behavior and options.
-
-### Delete
-
-Occurs when a managed resource is removed from the program or when the stack is destroyed.
-
-These operations have different risk profiles. Always review replacements and deletes carefully. A replacement of a stateless development container is not equivalent to replacement of a production database.
-
-To observe a proposed delete without applying it, temporarily remove or comment out the container declaration, run preview, study the plan, then restore the code before applying anything.
-
----
-
-## Structured Troubleshooting
-
-Troubleshoot from the lowest relevant layer upward:
-
-1. CLI and `PATH`
-2. Language runtime
-3. npm dependencies
-4. Backend and secrets provider
-5. Active project and stack
-6. Provider connectivity
-7. Docker Engine
-8. Registry/network access
-9. Resource-specific configuration
-
-### `pulumi: command not found`
-
-```bash
-# Linux or macOS
-which pulumi
-```
-
-```powershell
-# Windows
-where.exe pulumi
-```
-
-Check whether the binary exists and whether the correct directory is in `PATH`. Opening a new terminal may be required. Reinstalling repeatedly without checking the path can create multiple versions.
-
-### Cannot connect to Docker daemon
-
-```bash
-docker info
-docker ps
-```
-
-If these commands fail, fix Docker first. On Linux, verify the service and Docker socket permissions. Membership in the `docker` group is security-sensitive because Docker access can provide high privilege on the host. Follow organizational policy rather than changing permissions casually.
-
-On Docker Desktop, verify that the application is running and the correct Docker context is active.
-
-### Port already allocated
-
-List existing containers and ports:
-
-```bash
-docker ps --format "table {{.Names}}\t{{.Ports}}"
-```
-
-Choose an unused port:
-
-```bash
-pulumi config set hostPort 8090
-pulumi preview --diff
-pulumi up --diff
-```
-
-A port conflict is a host-level error, not a Pulumi state error.
-
-### `Module not found: @pulumi/docker`
-
-Reinstall dependencies from the lockfile:
-
-```bash
-rm -rf node_modules
-npm ci
-```
-
-On Windows, remove the directory using an appropriate PowerShell or Command Prompt command, then run `npm ci`.
-
-Verify that `package.json` and `package-lock.json` are present and that the command is executed from the project directory.
-
-### Local backend passphrase or secrets-provider failure
-
-A passphrase error means encrypted configuration or stack metadata cannot be decrypted. Recover the correct passphrase from the approved password manager. Do not create a new passphrase and expect old ciphertext to decrypt.
-
-Environment variables can be used in controlled automation, but they must be protected from shell history, process inspection, and CI logs.
-
-### Interrupted or partial update
-
-Do not immediately delete state files. Review:
-
-```bash
-pulumi stack
-pulumi stack --show-urns
-pulumi refresh --diff
-pulumi preview --diff
-```
-
-Then determine whether to resume, repair, import, delete, or restore. The correct response depends on which provider operations completed.
-
-### Wrong active stack
-
-```bash
-pulumi stack
-pulumi stack ls
-```
-
-Stop before applying changes. Select the correct stack explicitly:
-
-```bash
-pulumi stack select dev
-```
-
-Production workflows should add CI/CD restrictions and approvals so sensitive stacks cannot be updated casually from a workstation.
-
----
-
-## Add the Project to Git
-
-Initialize the repository:
-
-```bash
-git init
-printf "node_modules/
-*.stack.json
-dev-state.json
-" >> .gitignore
-git add .
-git commit -m "Create first Pulumi Docker deployment"
-```
-
-Commit:
-
-- `Pulumi.yaml`
-- `Pulumi.<stack>.yaml` when it contains encrypted secrets rather than plaintext sensitive data and organizational policy permits it
-- `index.ts`
-- `package.json`
-- `package-lock.json`
-- `tsconfig.json`
-- Documentation
-
-Do not commit:
-
-- `node_modules/`
-- State exports
-- Unencrypted secret files
-- Temporary logs
-- Local environment files containing credentials
-
-Encrypted Pulumi configuration is safer than plaintext, but repository policy and backend security still matter.
-
----
-
-## Extended Program with More Configuration
-
-The following version allows the image name and restart policy to vary by stack:
-
-```typescript
-import * as pulumi from "@pulumi/pulumi";
-import * as docker from "@pulumi/docker";
-
-const config = new pulumi.Config();
-
-const hostPort = config.getNumber("hostPort") ?? 8080;
-const imageName = config.get("imageName") ?? "nginx:alpine";
-const restartPolicy = config.get("restartPolicy") ?? "unless-stopped";
-const containerName =
-    config.get("containerName") ?? `pulumi-nginx-${pulumi.getStack()}`;
-
-const image = new docker.RemoteImage("nginxImage", {
-    name: imageName,
-    keepLocally: true,
-});
-
-const container = new docker.Container("nginxContainer", {
-    name: containerName,
-    image: image.imageId,
-    ports: [{ internal: 80, external: hostPort, protocol: "tcp" }],
-    restart: restartPolicy,
-});
-
-export const containerNameOutput = container.name;
-export const containerId = container.id;
-export const imageId = image.imageId;
-export const url = pulumi.interpolate`http://localhost:${hostPort}`;
-```
-
-Example configuration:
-
-```bash
-pulumi config set imageName nginx:alpine
-pulumi config set restartPolicy unless-stopped
-pulumi config
-```
-
-This design demonstrates a reusable program with environment-specific values stored outside the source logic.
-
----
-
-## Clean Up Correctly
-
-Destroy staging first:
-
-```bash
-pulumi stack select staging
-pulumi destroy --diff
-```
-
-Destroy development:
-
-```bash
-pulumi stack select dev
-pulumi destroy --diff
-```
-
-Verify that the resources are gone:
+Confirm that Docker no longer has the container:
 
 ```bash
 docker ps -a --filter name=pulumi-nginx
-docker images nginx
 ```
 
-The image can remain because `keepLocally: true` was configured.
+Pulumi's last checkpoint may still record the container because external deletion does not automatically rewrite Pulumi state.
 
-Destroying resources does not automatically remove the stack record. Remove the stacks only after confirming that no managed resources remain and no state history is needed:
+Inspect the current stack:
 
 ```bash
-pulumi stack select staging
-pulumi stack rm
-
-pulumi stack select dev
-pulumi stack rm
+pulumi stack
 ```
 
-Removing a stack is a separate lifecycle operation from destroying its resources.
+### Refresh the recorded state
+
+```bash
+pulumi refresh
+```
+
+`pulumi refresh` asks the Docker provider to read actual resources and updates Pulumi's recorded state to reflect reality.
+
+Refresh does **not** reapply `Pulumi.yaml`. It synchronizes recorded state with the provider's actual state.
+
+Preview the desired recovery:
+
+```bash
+pulumi preview
+```
+
+Pulumi should now plan to recreate the missing container.
+
+Reapply the desired state:
+
+```bash
+pulumi up
+```
+
+Validate the recovered service:
+
+```bash
+docker ps --filter name=pulumi-nginx
+curl -fsS http://127.0.0.1:8081
+```
+
+The relationship is:
+
+```text
+Pulumi.yaml       = desired state
+Pulumi checkpoint = recorded state
+Docker Engine     = actual state
+```
+
+Drift exists when recorded or desired state no longer matches actual provider state.
 
 ---
 
-## Exercises
+## Export a State Backup
 
-1. Add `imageName` to configuration and use different image tags in `dev` and `staging`.
-2. Add `restartPolicy` to configuration.
-3. Export the physical container name as a stack output.
-4. Create a third stack named `test` using a unique port and container name.
-5. Stop the staging container manually, refresh the stack, and explain the resulting diff.
-6. Delete a container manually and restore it with Pulumi.
-7. Temporarily remove the image resource from code and inspect the preview without applying it.
-8. Change a logical resource name and observe the proposed delete/create behavior. Then investigate aliases before applying such a refactor.
-9. Pin Nginx to a specific immutable version or digest and explain why it improves reproducibility.
-10. Add a CI command that reads the `url` output and runs a smoke test.
-11. Explain which files belong in Git and which files must remain local.
-12. Write a recovery plan for a lost local backend.
+Export the current stack state:
 
----
+```bash
+pulumi stack export > stack-backup.json
+ls -lh stack-backup.json
+head -n 30 stack-backup.json
+```
 
-## Review Questions
+The exported file can be useful for backup, migration, and troubleshooting.
 
-- Why is Docker the target platform rather than a replacement for Pulumi?
-- Why does `docker.Container` depend on `docker.RemoteImage`?
-- Why is changing a port potentially a replacement rather than an in-place update?
-- Why can a normal preview miss live drift?
-- What is the difference between the Pulumi URN and the Docker container ID?
-- Why is a stack output different from a log message?
-- Why should a mutable image tag be treated carefully?
-- Why does one source program create two real environments without copying the code?
-- What must be checked before destroying or removing a stack?
-- Why is a local backend unsuitable as the default production choice?
+Important rules:
+
+- Do not edit state casually with a text editor.
+- A malformed state file can break resource tracking.
+- State can include sensitive metadata.
+- Encrypted secrets may still be present as ciphertext.
+- Do not commit `stack-backup.json` to a public repository.
 
 ---
 
-## Key Takeaways
+## Destroy the Infrastructure
 
-- Pulumi coordinates a language runtime, provider, backend, and target platform.
-- Docker remains responsible for Docker resources; Pulumi manages their declared lifecycle.
-- The project is shared source logic, while each stack owns independent configuration and state.
-- Preview, update, refresh, and destroy serve different lifecycle purposes.
-- Provider outputs create dependency relationships between resources.
-- State is a management artifact and must not be treated as disposable.
-- Configuration changes can cause replacement and real operational impact.
-- Drift must be detected and reconciled intentionally.
-- Validation should include both Pulumi output and direct target-platform checks.
-- Safe cleanup requires destroying resources before removing stack records.
+Delete all custom resources managed by the current stack:
+
+```bash
+pulumi destroy
+```
+
+Pulumi reads state and deletes resources in reverse dependency order. The container must be removed before resources it depends on.
+
+Conceptual order:
+
+```text
+Read stack state
+       ↓
+Build reverse dependency order
+       ↓
+Delete webContainer
+       ↓
+Delete appNetwork
+       ↓
+Delete managed RemoteImage when possible
+       ↓
+Write an empty-resource checkpoint
+```
+
+Validate cleanup:
+
+```bash
+docker ps -a --filter name=pulumi-nginx
+docker network ls --filter name=pulumi-nginx-network
+pulumi stack
+```
+
+The container and network should be absent. The image may remain when Docker or provider constraints prevent removal, or when another object uses it.
+
+The stack still exists after destroy, but it contains no custom managed resources.
+
+Remove the empty stack when it is no longer required:
+
+```bash
+pulumi stack rm dev
+```
+
+Do not remove a stack while real managed resources still exist unless you intentionally accept orphaned resources and understand the consequences.
+
+Removing a stack does not delete the project files from disk.
 
 ---
 
-## Official References
+## Create a Second Stack
 
-- Pulumi Installation: <https://www.pulumi.com/docs/iac/download-install/>
-- Pulumi CLI: <https://www.pulumi.com/docs/iac/cli/>
-- Projects: <https://www.pulumi.com/docs/iac/concepts/projects/>
-- Stacks: <https://www.pulumi.com/docs/iac/concepts/stacks/>
-- State and Backends: <https://www.pulumi.com/docs/iac/concepts/state-and-backends/>
-- Configuration and Secrets: <https://www.pulumi.com/docs/iac/concepts/config/>
-- Docker Provider: <https://www.pulumi.com/registry/packages/docker/>
-- Docker `RemoteImage`: <https://www.pulumi.com/registry/packages/docker/api-docs/remoteimage/>
-- Docker `Container`: <https://www.pulumi.com/registry/packages/docker/api-docs/container/>
-- Drift Detection: <https://www.pulumi.com/docs/deployments/deployments/drift/>
+A project can have multiple independent stacks. Create a `test` stack using the same `Pulumi.yaml`:
 
-> CLI behavior, provider schemas, and Docker resource properties can change. Review the documentation for the versions used by your project before applying the workflow to production infrastructure.
+```bash
+pulumi stack init test
+pulumi config set appName pulumi-nginx-test
+pulumi config set hostPort 8090
+pulumi config set webRoot "$(pwd)/html"
+pulumi up
+```
+
+Because `dev` and `test` use the same Docker host, they must use different physical names and host ports to avoid conflicts.
+
+Inspect stacks and switch between them:
+
+```bash
+pulumi stack ls
+pulumi stack select dev
+pulumi stack select test
+```
+
+Each stack has independent:
+
+- Configuration
+- State
+- Resource IDs
+- Outputs
+- Update history
+
+After testing, clean up the `test` stack:
+
+```bash
+pulumi stack select test
+pulumi destroy
+pulumi stack rm test
+pulumi stack select dev
+```
+
+---
+
+## Troubleshooting
+
+### `pulumi: command not found`
+
+Check the executable and `PATH`:
+
+```bash
+ls -la "$HOME/.pulumi/bin"
+echo "$PATH"
+command -v pulumi
+```
+
+Temporarily fix the current shell:
+
+```bash
+export PATH="$HOME/.pulumi/bin:$PATH"
+```
+
+Persist the setting:
+
+```bash
+echo 'export PATH="$HOME/.pulumi/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+### Cannot connect to the Docker daemon
+
+Check the daemon:
+
+```bash
+sudo systemctl is-active docker
+sudo systemctl status docker --no-pager
+```
+
+Start it when required:
+
+```bash
+sudo systemctl enable --now docker
+```
+
+### Permission denied on `/var/run/docker.sock`
+
+Inspect permissions and group membership:
+
+```bash
+ls -l /var/run/docker.sock
+id
+```
+
+Add the current user to the Docker group:
+
+```bash
+sudo usermod -aG docker "$USER"
+newgrp docker
+```
+
+Then retest:
+
+```bash
+docker info
+```
+
+Do not use `sudo pulumi up` as the normal fix. It can create root-owned project, state, and plugin files.
+
+### Port is already allocated
+
+Identify listeners and containers using the port:
+
+```bash
+sudo ss -lntp | grep ':8080'
+docker ps --format 'table {{.ID}}\t{{.Names}}\t{{.Ports}}'
+```
+
+Select another port:
+
+```bash
+pulumi config set hostPort 8081
+pulumi preview
+pulumi up
+```
+
+### Missing required configuration variable `webRoot`
+
+Verify the active stack:
+
+```bash
+pulumi stack
+```
+
+Set the required value from the project root:
+
+```bash
+pulumi config set webRoot "$(pwd)/html"
+pulumi config
+```
+
+### YAML parse error
+
+Check indentation and avoid tabs:
+
+```bash
+sed -n '1,220p' Pulumi.yaml
+```
+
+Use an editor with YAML validation. Provider-property errors commonly include the exact invalid property path.
+
+### Image pull failure
+
+Test Docker independently:
+
+```bash
+docker pull nginx:alpine
+```
+
+Check DNS and HTTPS connectivity:
+
+```bash
+getent hosts registry-1.docker.io
+curl -I https://registry-1.docker.io
+```
+
+In corporate networks, proxy settings may be required for both the interactive shell and Docker daemon.
+
+### Provider plugin download failure
+
+Inspect network connectivity and installed plugins:
+
+```bash
+pulumi plugin ls
+curl -I https://api.pulumi.com
+```
+
+The exact endpoint used can vary. Check proxy, firewall, TLS interception, DNS, and outbound HTTPS rules.
+
+### HTTP request fails after successful deployment
+
+Check each layer separately:
+
+```bash
+pulumi stack output applicationUrl
+docker ps --filter name=pulumi-nginx
+docker logs pulumi-nginx
+docker inspect pulumi-nginx --format '{{json .NetworkSettings.Ports}}'
+sudo ss -lntp | grep ':8080\|:8081'
+```
+
+Also verify:
+
+```bash
+test -r html/index.html && echo OK
+```
+
+If running on a remote server, `localhost` refers to the server itself. Use the server IP or DNS name from the client, and confirm firewall rules permit access.
+
+### Destroy cannot remove the image
+
+An image can remain when another container, tag, or resource uses it. Inspect references:
+
+```bash
+docker ps -a --filter ancestor=nginx:alpine
+docker image ls nginx
+docker image inspect nginx:alpine
+```
+
+Do not force-remove an image on a shared host without checking consumers.
+
+---
+
+## Equivalent TypeScript and Python Resources
+
+The project uses Pulumi YAML. The following examples demonstrate how the same basic image and container resources can be authored in other supported languages.
+
+These language programs do not execute Docker commands directly. Their Pulumi SDK constructors register resources with the engine, and the Docker provider performs Docker API operations.
+
+### TypeScript
+
+```typescript
+import * as docker from "@pulumi/docker";
+
+const image = new docker.RemoteImage("nginxImage", {
+  name: "nginx:alpine",
+});
+
+const container = new docker.Container("webContainer", {
+  name: "pulumi-nginx",
+  image: image.imageId,
+  ports: [
+    {
+      internal: 80,
+      external: 8080,
+    },
+  ],
+});
+```
+
+TypeScript projects normally require Node.js and the relevant Pulumi packages.
+
+### Python
+
+```python
+import pulumi_docker as docker
+
+image = docker.RemoteImage(
+    "nginxImage",
+    name="nginx:alpine",
+)
+
+container = docker.Container(
+    "webContainer",
+    name="pulumi-nginx",
+    image=image.image_id,
+    ports=[
+        {
+            "internal": 80,
+            "external": 8080,
+        }
+    ],
+)
+```
+
+Python projects require Python and the relevant Pulumi packages.
+
+### Pulumi YAML
+
+```yaml
+resources:
+  nginxImage:
+    type: docker:RemoteImage
+    properties:
+      name: nginx:alpine
+
+  webContainer:
+    type: docker:Container
+    properties:
+      name: pulumi-nginx
+      image: ${nginxImage.imageId}
+      ports:
+        - internal: 80
+          external: 8080
+```
+
+The differences are mainly in authoring syntax and the abstraction capabilities available in each language. The engine, state system, provider, and Docker API roles remain the same.
+
+TypeScript or Python becomes especially useful when the infrastructure requires reusable functions, loops, tests, packages, custom component resources, or complex application logic.
+
+---
+
+## Security and Production Notes
+
+This project is designed for learning. Before adapting it to production, consider the following.
+
+### Docker socket access
+
+Access to `/var/run/docker.sock` is highly privileged. Limit group membership and audit users who can access Docker.
+
+### Network exposure
+
+The example binds to `0.0.0.0`. This exposes the service on every IPv4 interface, subject to firewall rules. Use `127.0.0.1` when only local access is required.
+
+### Image tags
+
+Mutable tags such as `nginx:alpine` can point to different image content over time. Production systems should consider immutable digests and an explicit image promotion strategy.
+
+### State backend
+
+A local backend is not ideal for multi-user production environments. Use a shared backend with:
+
+- Access controls
+- Backups
+- Encryption
+- Concurrency handling
+- Auditability
+- Documented recovery procedures
+
+### Secrets
+
+Do not store plaintext credentials in `Pulumi.yaml`, shell history, or unencrypted repository files. Use Pulumi secrets and an appropriate secrets provider.
+
+### Bind mounts
+
+Bind mounts couple the container to a host path. For immutable and portable deployments, package content in a versioned image or use a controlled storage strategy.
+
+### Backups
+
+Back up stack state before risky state operations or backend migrations. Protect exported state files as potentially sensitive artifacts.
+
+### Running Pulumi
+
+Run Pulumi as the intended project user. Avoid mixing root and non-root execution because it can create ownership conflicts in project files, plugin directories, and local backend data.
+
+---
+
+## Recommended Repository Files
+
+A clean repository can use this structure:
+
+```text
+pulumi-docker-yaml-lab/
+├── .gitignore
+├── README.md
+├── Pulumi.yaml
+├── Pulumi.dev.yaml
+└── html/
+    └── index.html
+```
+
+Recommended `.gitignore` entries:
+
+```gitignore
+# Exported Pulumi state backups
+stack-backup.json
+*.stack-backup.json
+
+# Local editor and operating-system files
+.vscode/
+.idea/
+.DS_Store
+
+# Temporary files
+*.tmp
+*.log
+```
+
+`Pulumi.dev.yaml` is commonly committed when it contains environment configuration intended for the repository. Pulumi secret values are normally encrypted, but always review the file and your organization's policy before committing it.
+
+Do not commit exported raw state backups to public source control.
+
+---
+
+## Command Reference
+
+### Environment and network
+
+```bash
+cat /etc/os-release
+uname -m
+whoami
+id
+pwd
+sudo -v
+curl -I https://get.pulumi.com
+curl -I https://download.docker.com
+```
+
+### Pulumi installation
+
+```bash
+curl -fsSL https://get.pulumi.com | sh
+export PATH="$HOME/.pulumi/bin:$PATH"
+echo 'export PATH="$HOME/.pulumi/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+command -v pulumi
+pulumi version
+```
+
+### Docker verification
+
+```bash
+docker version
+sudo systemctl is-active docker
+docker info
+docker run --rm hello-world
+```
+
+### Pulumi backend and project
+
+```bash
+pulumi login --local
+pulumi whoami
+mkdir -p ~/labs/pulumi-docker-yaml-lab
+cd ~/labs/pulumi-docker-yaml-lab
+pulumi new yaml --name pulumi-docker-yaml-lab --stack dev
+```
+
+### Configuration
+
+```bash
+pulumi config set webRoot "$(pwd)/html"
+pulumi config set hostPort 8080
+pulumi config
+```
+
+### Lifecycle
+
+```bash
+pulumi preview
+pulumi up
+pulumi stack
+pulumi stack output
+pulumi refresh
+pulumi stack export > stack-backup.json
+pulumi destroy
+pulumi stack rm dev
+```
+
+### Validation
+
+```bash
+docker ps --filter name=pulumi-nginx
+docker image ls nginx
+docker network inspect pulumi-nginx-network
+docker inspect pulumi-nginx
+curl -fsS http://127.0.0.1:8080
+```
+
+---
+
+## Official Documentation
+
+- [Install Pulumi](https://www.pulumi.com/docs/install/)
+- [Pulumi YAML](https://www.pulumi.com/docs/iac/languages-sdks/yaml/)
+- [Pulumi YAML Language Reference](https://www.pulumi.com/docs/iac/languages-sdks/yaml/yaml-language-reference/)
+- [Pulumi State and Backends](https://www.pulumi.com/docs/iac/concepts/state-and-backends/)
+- [Pulumi Docker Provider](https://www.pulumi.com/registry/packages/docker/)
+- [Docker Container Resource](https://www.pulumi.com/registry/packages/docker/api-docs/container/)
+- [Docker RemoteImage Resource](https://www.pulumi.com/registry/packages/docker/api-docs/remoteimage/)
+- [Docker Network Resource](https://www.pulumi.com/registry/packages/docker/api-docs/network/)
+- [Install Docker Engine on Ubuntu](https://docs.docker.com/engine/install/ubuntu/)
+- [Docker Linux Post-Installation Steps](https://docs.docker.com/engine/install/linux-postinstall/)
