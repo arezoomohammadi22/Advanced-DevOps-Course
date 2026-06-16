@@ -1,1223 +1,1548 @@
-# Deploying a Kubernetes Application with Pulumi and Kind
+# Pulumi Kubernetes Multi-Stack Deployment
 
-This guide uses Pulumi, TypeScript, Kubernetes, and Kind to build and manage a complete local application environment. It starts with cluster creation and kubeconfig validation, then defines an explicit Kubernetes provider, a stack-specific namespace, a ConfigMap, an Nginx Deployment, health probes, resource requests and limits, a ConfigMap-backed volume, and a NodePort Service. It continues through deployment validation, scaling, rolling updates, content changes, drift detection, state reconciliation, multiple stacks, troubleshooting, and complete cleanup.
+Deploy one Kubernetes application into two isolated namespaces by using a single Pulumi YAML program and two independent Pulumi stacks.
 
-The cluster is local so that the entire workflow can be practiced without a cloud account or managed-Kubernetes cost. The same Kubernetes resources can later be deployed to EKS, AKS, GKE, OpenShift, or another conformant cluster by changing the provider connection and environment-specific configuration.
+The project demonstrates how a shared infrastructure definition can manage multiple environments without duplicating the program. The `dev` and `staging` stacks use the same `Pulumi.yaml`, but each stack has its own configuration, state, Kubernetes namespace, resource policy, and lifecycle.
 
 ---
 
-## Learning Outcomes
+## Table of Contents
 
-After completing this guide, you should be able to:
-
-- Explain the relationship between a Pulumi program, the Kubernetes provider, kubeconfig, a Kubernetes context, and the API server.
-- Create a Kind cluster with fixed host-to-node port mappings.
-- Verify cluster health before starting an IaC deployment.
-- Create a TypeScript Pulumi project and install `@pulumi/kubernetes`.
-- Configure Pulumi to use an explicit Kubernetes context instead of relying on whichever context happens to be current.
-- Create a namespace for each stack.
-- Use labels and selectors to connect Deployments, Pods, and Services.
-- Store web content in a ConfigMap and mount it into a container.
-- Configure Deployment replicas, rolling-update strategy, Pod templates, resources, readiness, liveness, and volumes.
-- Expose the application through a NodePort Service in a local Kind environment.
-- Validate the deployment with Pulumi outputs, `kubectl`, rollout status, logs, describe output, and `curl`.
-- Scale the workload, change the image, and force a rollout when configuration-backed content changes.
-- Introduce controlled drift with `kubectl`, refresh Pulumi state, and restore the desired state.
-- Create independent `dev` and `staging` stacks in one cluster without namespace, NodePort, or host-port collisions.
-- Explain the difference between Pulumi state and Kubernetes control-plane state.
-- Troubleshoot context, cluster, NodePort, image-pull, readiness, rollout, and unexpected replacement failures.
-- Destroy application stacks before deleting the underlying cluster.
+- [Architecture](#architecture)
+- [What This Project Teaches](#what-this-project-teaches)
+- [Environment Design](#environment-design)
+- [Pulumi Stack Versus Kubernetes Namespace](#pulumi-stack-versus-kubernetes-namespace)
+- [Execution and State Flows](#execution-and-state-flows)
+- [Prerequisites](#prerequisites)
+- [Verify the Kubernetes Context and Permissions](#verify-the-kubernetes-context-and-permissions)
+- [Verify the Pulumi Backend](#verify-the-pulumi-backend)
+- [Create the Project](#create-the-project)
+- [Repository Layout](#repository-layout)
+- [Project Files](#project-files)
+  - [`Pulumi.yaml`](#pulumiyaml)
+  - [`Pulumi.dev.yaml`](#pulumidevyaml)
+  - [`Pulumi.staging.yaml`](#pulumistagingyaml)
+  - [`.gitignore`](#gitignore)
+- [Create and Configure the Stacks](#create-and-configure-the-stacks)
+- [Preview and Deploy Development](#preview-and-deploy-development)
+- [Validate Development](#validate-development)
+- [Preview and Deploy Staging](#preview-and-deploy-staging)
+- [Validate Staging](#validate-staging)
+- [Prove Stack Independence](#prove-stack-independence)
+- [Inspect Stack State](#inspect-stack-state)
+- [Update Only Development](#update-only-development)
+- [Trigger a Rolling Update in Staging](#trigger-a-rolling-update-in-staging)
+- [Drift Detection and Recovery](#drift-detection-and-recovery)
+- [Why Deleting a Pod Is Usually Not Persistent Pulumi Drift](#why-deleting-a-pod-is-usually-not-persistent-pulumi-drift)
+- [Provider and Namespace Behavior](#provider-and-namespace-behavior)
+- [Dependency Graph](#dependency-graph)
+- [What Namespace Isolation Does and Does Not Provide](#what-namespace-isolation-does-and-does-not-provide)
+- [Optional Resource Protection](#optional-resource-protection)
+- [Troubleshooting](#troubleshooting)
+- [Cleanup](#cleanup)
+- [Production Considerations](#production-considerations)
+- [Exercises](#exercises)
+- [Final Verification Checklist](#final-verification-checklist)
+- [Official References](#official-references)
 
 ---
 
 ## Architecture
 
-The final request path for development is:
-
 ```text
-Browser or curl
-    |
-    v
-127.0.0.1:8080 on the host
-    |
-    v
-Kind container port 30080
-    |
-    v
-Kubernetes NodePort Service
-    |
-    v
-Service selector
-    |
-    v
-Ready Nginx Pods on container port 80
+One Pulumi Project
+        │
+        ├── Shared Pulumi.yaml program
+        │
+        ├── Stack: dev
+        │     ├── Pulumi.dev.yaml
+        │     ├── Independent state checkpoint
+        │     └── Kubernetes namespace: pulumi-dev
+        │
+        └── Stack: staging
+              ├── Pulumi.staging.yaml
+              ├── Independent state checkpoint
+              └── Kubernetes namespace: pulumi-staging
 ```
 
-Staging uses a separate path:
+Each stack creates the following resources:
 
 ```text
-127.0.0.1:8081
-    -> Kind node port 30081
-    -> staging NodePort Service
-    -> staging Pods
+Namespace
+├── ResourceQuota
+├── ConfigMap
+├── Deployment
+│   └── ReplicaSet
+│       └── Pod(s)
+└── ClusterIP Service
+    └── EndpointSlice
 ```
 
-The Pulumi resource graph contains:
+The application is an Nginx web service. Its `index.html` file is provided by a ConfigMap and contains environment-specific values such as the active Pulumi stack, namespace, and message.
 
-1. An explicit Kubernetes provider
-2. A namespace whose name includes the active stack
-3. A ConfigMap in that namespace
-4. A Deployment that references the namespace and ConfigMap
-5. A Service that selects the Deployment's Pods
-6. Stack outputs for resource names, desired replicas, and the local URL
+---
 
-Pulumi manages the lifecycle of these Kubernetes objects. Kubernetes controllers manage the continuous runtime reconciliation inside the cluster. Both systems maintain state, but they have different responsibilities.
+## What This Project Teaches
+
+This lab covers the following concepts:
+
+- One shared Pulumi YAML program for multiple environments.
+- Independent `dev` and `staging` stacks.
+- Independent configuration and state per stack.
+- One Kubernetes namespace per environment.
+- An explicit Kubernetes provider with a stack-specific default namespace.
+- Built-in Pulumi YAML variables such as `${pulumi.stack}`.
+- Stack configuration with strongly typed integer and string values.
+- Kubernetes Namespace, ResourceQuota, ConfigMap, Deployment, and Service resources.
+- Deployment selectors, pod labels, RollingUpdate behavior, and health probes.
+- CPU and memory requests and limits.
+- ConfigMap volumes mounted into Nginx.
+- Implicit and explicit Pulumi dependencies.
+- Stack outputs for operational commands and service discovery.
+- Independent updates and destruction of environments.
+- Pulumi drift detection, remediation, and adoption.
+- The difference between Pulumi reconciliation and Kubernetes controller reconciliation.
+
+---
+
+## Environment Design
+
+| Setting | `dev` | `staging` |
+|---|---:|---:|
+| Kubernetes namespace | `pulumi-dev` | `pulumi-staging` |
+| Initial replicas | `1` | `2` |
+| Local port-forward port | `8081` | `8082` |
+| Pod quota | `10` | `20` |
+| CPU request | `50m` | `100m` |
+| CPU limit | `250m` | `500m` |
+| Memory request | `64Mi` | `128Mi` |
+| Memory limit | `128Mi` | `256Mi` |
+| Environment message | Development environment | Staging environment |
+
+Both environments use the same Kubernetes resource names, such as `multi-stack-web`. This is valid because namespaced resources are identified by both their namespace and name.
+
+```text
+pulumi-dev/multi-stack-web
+pulumi-staging/multi-stack-web
+```
+
+---
+
+## Pulumi Stack Versus Kubernetes Namespace
+
+A Pulumi stack and a Kubernetes namespace solve different problems.
+
+### Pulumi stack
+
+A stack is an independently configurable instance of a Pulumi program. Each stack has:
+
+- its own configuration;
+- its own state checkpoint;
+- its own resource URNs;
+- its own update history;
+- an independent lifecycle.
+
+### Kubernetes namespace
+
+A namespace is a Kubernetes scope for namespaced resources. It helps organize resources and permits identical names in different namespaces.
+
+In this project, each Pulumi stack is intentionally mapped to one Kubernetes namespace:
+
+```text
+Pulumi stack dev      → Kubernetes namespace pulumi-dev
+Pulumi stack staging  → Kubernetes namespace pulumi-staging
+```
+
+The mapping is a design decision. A namespace does not replace a stack, and a stack does not replace a namespace.
+
+> **Ownership rule:** Two independent stacks must not manage the same physical namespace or the same physical Kubernetes resource. Every resource must have one clear Pulumi owner.
+
+---
+
+## Execution and State Flows
+
+Pulumi uses two independent paths during an update.
+
+### State path
+
+```text
+Pulumi CLI
+    ↓
+Pulumi Engine
+    ↓
+Active Backend
+    ↓
+Selected Stack State
+```
+
+The backend may be Pulumi Cloud, a local backend, PostgreSQL, S3-compatible storage, or another supported backend. The backend stores Pulumi state; it does not create Kubernetes resources.
+
+### Infrastructure path
+
+```text
+Pulumi YAML Program
+    ↓
+Pulumi YAML Runtime
+    ↓
+Pulumi Engine
+    ↓
+Kubernetes Provider
+    ↓
+Kubernetes API Server
+    ↓
+Kubernetes Controllers
+    ↓
+ReplicaSet and Pods
+```
+
+When Pulumi creates a Deployment, Pulumi manages the Deployment object. Kubernetes controllers create and reconcile its ReplicaSet and Pods.
 
 ---
 
 ## Prerequisites
 
-Install:
+The following tools and access are required:
 
-- Docker Engine or Docker Desktop
-- Kind
-- `kubectl`
-- Pulumi CLI
-- Node.js LTS
-- npm
-- Git, recommended
-- A code editor, recommended
+- Pulumi CLI.
+- `kubectl`.
+- Access to a Kubernetes cluster.
+- A valid kubeconfig.
+- Permission to create namespaces, deployments, services, ConfigMaps, and ResourceQuotas.
+- A configured Pulumi backend.
+- Optional: `jq` for inspecting exported state.
+- Optional: `curl` for HTTP validation.
 
-Verify all tools:
+The Kubernetes cluster may be Minikube, kind, K3s, an on-premises cluster, or a managed Kubernetes service.
+
+Check the installed tools and cluster:
 
 ```bash
-docker version
-kind version
-kubectl version --client
 pulumi version
-node --version
-npm --version
-```
-
-Verify Docker independently:
-
-```bash
-docker info
-docker ps
-```
-
-Kind runs Kubernetes nodes as Docker containers. If Docker is not healthy, the cluster cannot be created and the Pulumi Kubernetes provider will have no API server to target.
-
----
-
-## Create the Working Directories
-
-```bash
-mkdir pulumi-k8s-lab
-cd pulumi-k8s-lab
-mkdir cluster
-mkdir infra
-```
-
-The directory layout separates cluster bootstrap from application infrastructure:
-
-```text
-pulumi-k8s-lab/
-├── cluster/
-│   └── kind-config.yaml
-└── infra/
-    ├── Pulumi.yaml
-    ├── Pulumi.dev.yaml
-    ├── index.ts
-    ├── package.json
-    ├── package-lock.json
-    ├── tsconfig.json
-    └── node_modules/
-```
-
-In a larger repository, cluster provisioning and in-cluster workloads may be separate projects or repositories with separate ownership and deployment pipelines. They are kept close here to make the complete flow visible.
-
----
-
-## Create the Kind Cluster Configuration
-
-Create `cluster/kind-config.yaml`:
-
-```yaml
-kind: Cluster
-apiVersion: kind.x-k8s.io/v1alpha4
-name: pulumi-lab
-nodes:
-  - role: control-plane
-    extraPortMappings:
-      - containerPort: 30080
-        hostPort: 8080
-        listenAddress: "127.0.0.1"
-        protocol: TCP
-      - containerPort: 30081
-        hostPort: 8081
-        listenAddress: "127.0.0.1"
-        protocol: TCP
-```
-
-### Why port mapping is required
-
-A Kind node is itself a Docker container. A Kubernetes NodePort opens a port on the node, but the node is not the host operating system. `extraPortMappings` forwards host traffic into the node container.
-
-The numbers must align:
-
-- Development Service `nodePort`: `30080`
-- Kind `containerPort`: `30080`
-- Host port: `8080`
-
-- Staging Service `nodePort`: `30081`
-- Kind `containerPort`: `30081`
-- Host port: `8081`
-
-The mapping is bound to `127.0.0.1`, which limits exposure to the local machine. Binding to all interfaces would increase the attack surface and is unnecessary for this lab.
-
----
-
-## Create and Validate the Cluster
-
-Create the cluster from the repository root:
-
-```bash
-kind create cluster \
-  --name pulumi-lab \
-  --config cluster/kind-config.yaml
-```
-
-Kind normally creates the kubeconfig context `kind-pulumi-lab`.
-
-Verify the context and API server:
-
-```bash
-kubectl config get-contexts
+kubectl version --client
 kubectl config current-context
-kubectl cluster-info --context kind-pulumi-lab
-kubectl get nodes --context kind-pulumi-lab -o wide
+kubectl cluster-info
+kubectl get nodes
 ```
 
-Inspect the Docker node and system Pods:
+Expected result:
 
-```bash
-docker ps --filter name=pulumi-lab
-kubectl get pods -n kube-system --context kind-pulumi-lab
-```
+- Pulumi prints its installed version.
+- `kubectl` prints the current context.
+- `kubectl cluster-info` reaches the API server.
+- Nodes appear in a healthy state, normally `Ready`.
 
-Do not start the Pulumi deployment until the node is `Ready` and core system Pods are healthy. Otherwise, provider errors can be mistaken for program errors.
+If `kubectl` cannot access the cluster, the Pulumi Kubernetes provider will not be able to access it through the default kubeconfig configuration either.
 
 ---
 
-## Create the Pulumi Project
+## Verify the Kubernetes Context and Permissions
+
+Display the kubeconfig path used by the current shell:
 
 ```bash
-cd infra
-pulumi login --local
-pulumi new typescript
-npm install @pulumi/kubernetes
+echo "${KUBECONFIG:-$HOME/.kube/config}"
 ```
 
-Use a project name such as `pulumi-k8s-lab` and create a `dev` stack.
+Inspect the active context only:
 
-Expected structure:
+```bash
+kubectl config view --minify
+```
+
+Check the required permissions:
+
+```bash
+kubectl auth can-i create namespaces
+kubectl auth can-i create deployments.apps --all-namespaces
+kubectl auth can-i create services --all-namespaces
+kubectl auth can-i create configmaps --all-namespaces
+kubectl auth can-i create resourcequotas --all-namespaces
+```
+
+The expected result for each command is:
 
 ```text
-infra/
-├── Pulumi.yaml
-├── Pulumi.dev.yaml
-├── index.ts
-├── package.json
-├── package-lock.json
-├── tsconfig.json
-└── node_modules/
+yes
 ```
 
-A local backend is acceptable for an isolated lab. Team environments require secure shared state, access control, locking, backup, and recovery.
+If namespace creation is restricted, a cluster administrator can pre-create the namespaces. In that model, either import the existing namespaces into Pulumi or move namespace ownership to a separate platform stack. Do not allow two stacks to claim ownership of the same existing namespace.
+
+> Namespace separation alone is not complete security isolation. Production isolation commonly also requires RBAC, NetworkPolicy, ResourceQuota, LimitRange, and possibly separate nodes, runtimes, clusters, or cloud accounts.
 
 ---
 
-## Configure the Development Stack
+## Verify the Pulumi Backend
+
+Check the active backend and existing stacks:
 
 ```bash
-pulumi stack select dev
-pulumi config set kubeContext kind-pulumi-lab
-pulumi config set replicas 2
-pulumi config set image nginx:1.27-alpine
-pulumi config set contentVersion v1
-pulumi config set nodePort 30080
-pulumi config set hostPort 8080
-pulumi config
-```
-
-Configuration responsibilities:
-
-- `kubeContext` identifies the target cluster context.
-- `replicas` controls desired Pod count.
-- `image` controls the container image.
-- `contentVersion` is written to the Pod template to trigger a rollout when ConfigMap content changes.
-- `nodePort` must match the Kind node port mapping.
-- `hostPort` is used to publish a correct stack output for local access.
-
-`hostPort` does not configure Kubernetes. It documents the external host endpoint created by the Kind mapping. `nodePort` is the Kubernetes Service property.
-
----
-
-## Complete Pulumi Program
-
-Replace `infra/index.ts` with:
-
-```typescript
-import * as pulumi from "@pulumi/pulumi";
-import * as k8s from "@pulumi/kubernetes";
-
-const stack = pulumi.getStack();
-const config = new pulumi.Config();
-
-const kubeContext = config.get("kubeContext") ?? "kind-pulumi-lab";
-const replicas = config.getNumber("replicas") ?? 2;
-const image = config.get("image") ?? "nginx:1.27-alpine";
-const contentVersion = config.get("contentVersion") ?? "v1";
-const nodePort = config.getNumber("nodePort") ?? 30080;
-const hostPort = config.getNumber("hostPort") ?? 8080;
-
-const provider = new k8s.Provider("kind-provider", {
-    context: kubeContext,
-});
-
-const namespace = new k8s.core.v1.Namespace("demo-namespace", {
-    metadata: {
-        name: `pulumi-k8s-${stack}`,
-        labels: {
-            "app.kubernetes.io/managed-by": "pulumi",
-            "app.kubernetes.io/part-of": "pulumi-k8s-lab",
-        },
-    },
-}, { provider });
-
-const appLabels = {
-    "app.kubernetes.io/name": "pulumi-nginx",
-    "app.kubernetes.io/instance": stack,
-};
-
-const webContent = new k8s.core.v1.ConfigMap("web-content", {
-    metadata: {
-        name: "pulumi-nginx-content",
-        namespace: namespace.metadata.name,
-    },
-    data: {
-        "index.html": `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <title>Pulumi + Kubernetes</title>
-</head>
-<body>
-  <h1>Pulumi manages this Kubernetes application</h1>
-  <p>Stack: ${stack}</p>
-  <p>Content version: ${contentVersion}</p>
-</body>
-</html>`,
-    },
-}, { provider });
-
-const deployment = new k8s.apps.v1.Deployment("nginx-deployment", {
-    metadata: {
-        name: "pulumi-nginx",
-        namespace: namespace.metadata.name,
-        labels: appLabels,
-    },
-    spec: {
-        replicas,
-        selector: {
-            matchLabels: appLabels,
-        },
-        strategy: {
-            type: "RollingUpdate",
-            rollingUpdate: {
-                maxSurge: 1,
-                maxUnavailable: 0,
-            },
-        },
-        template: {
-            metadata: {
-                labels: appLabels,
-                annotations: {
-                    "demo.pulumi.com/content-version": contentVersion,
-                },
-            },
-            spec: {
-                containers: [{
-                    name: "nginx",
-                    image,
-                    imagePullPolicy: "IfNotPresent",
-                    ports: [{
-                        name: "http",
-                        containerPort: 80,
-                    }],
-                    resources: {
-                        requests: {
-                            cpu: "50m",
-                            memory: "64Mi",
-                        },
-                        limits: {
-                            cpu: "200m",
-                            memory: "128Mi",
-                        },
-                    },
-                    readinessProbe: {
-                        httpGet: {
-                            path: "/",
-                            port: "http",
-                        },
-                        initialDelaySeconds: 2,
-                        periodSeconds: 5,
-                    },
-                    livenessProbe: {
-                        httpGet: {
-                            path: "/",
-                            port: "http",
-                        },
-                        initialDelaySeconds: 10,
-                        periodSeconds: 10,
-                    },
-                    volumeMounts: [{
-                        name: "web-content",
-                        mountPath: "/usr/share/nginx/html",
-                        readOnly: true,
-                    }],
-                }],
-                volumes: [{
-                    name: "web-content",
-                    configMap: {
-                        name: webContent.metadata.name,
-                    },
-                }],
-            },
-        },
-    },
-}, {
-    provider,
-    dependsOn: [webContent],
-});
-
-const service = new k8s.core.v1.Service("nginx-service", {
-    metadata: {
-        name: "pulumi-nginx",
-        namespace: namespace.metadata.name,
-        labels: appLabels,
-    },
-    spec: {
-        type: "NodePort",
-        selector: appLabels,
-        ports: [{
-            name: "http",
-            port: 80,
-            targetPort: "http",
-            nodePort,
-        }],
-    },
-}, {
-    provider,
-    dependsOn: [deployment],
-});
-
-export const namespaceName = namespace.metadata.name;
-export const deploymentName = deployment.metadata.name;
-export const serviceName = service.metadata.name;
-export const desiredReplicas = replicas;
-export const localUrl = `http://localhost:${hostPort}`;
-```
-
----
-
-## Program Analysis
-
-### Imports, stack, and configuration
-
-```typescript
-import * as pulumi from "@pulumi/pulumi";
-import * as k8s from "@pulumi/kubernetes";
-
-const stack = pulumi.getStack();
-const config = new pulumi.Config();
-```
-
-The active stack becomes part of namespace and label identity. Configuration separates environment-specific values from resource logic.
-
-### Explicit provider and destination safety
-
-```typescript
-const provider = new k8s.Provider("kind-provider", {
-    context: kubeContext,
-});
-```
-
-Without an explicit provider, the Kubernetes package can use the current kubeconfig context. That is convenient but dangerous on a workstation connected to several clusters. An explicit provider makes the intended destination visible in code and stack configuration.
-
-The context still must exist in kubeconfig. A provider does not create the cluster or invent credentials.
-
-### Stack-specific namespace
-
-```typescript
-const namespace = new k8s.core.v1.Namespace("demo-namespace", {
-    metadata: {
-        name: `pulumi-k8s-${stack}`,
-        labels: {
-            "app.kubernetes.io/managed-by": "pulumi",
-            "app.kubernetes.io/part-of": "pulumi-k8s-lab",
-        },
-    },
-}, { provider });
-```
-
-The Pulumi logical name is `demo-namespace`. The Kubernetes physical name is `pulumi-k8s-dev` or `pulumi-k8s-staging`. The Pulumi URN is a third identity used by Pulumi state.
-
-Separate namespaces reduce collisions and create a clear operational boundary. A namespace is not a complete security boundary by itself; production isolation can also require RBAC, NetworkPolicy, quotas, separate clusters, or separate cloud accounts.
-
-### Labels and selectors
-
-```typescript
-const appLabels = {
-    "app.kubernetes.io/name": "pulumi-nginx",
-    "app.kubernetes.io/instance": stack,
-};
-```
-
-The same label set is used by:
-
-- Deployment metadata
-- Pod template metadata
-- Deployment selector
-- Service selector
-
-The Deployment selector must match the Pod template labels. The Service selector must match the Pods that should receive traffic. A typo can produce Running Pods with no Service endpoints.
-
-### ConfigMap
-
-The ConfigMap stores `index.html` separately from the Nginx image. This demonstrates configuration/content injection without building a custom image.
-
-```typescript
-const webContent = new k8s.core.v1.ConfigMap("web-content", {
-    metadata: {
-        name: "pulumi-nginx-content",
-        namespace: namespace.metadata.name,
-    },
-    data: {
-        "index.html": "...",
-    },
-}, { provider });
-```
-
-ConfigMaps are not secret stores. Sensitive values belong in Kubernetes Secrets or, preferably, a dedicated external secret system with an appropriate integration model.
-
-### Deployment desired state
-
-The Deployment specifies the number of replicas, selector, rollout strategy, and Pod template.
-
-```typescript
-spec: {
-    replicas,
-    selector: {
-        matchLabels: appLabels,
-    },
-    strategy: {
-        type: "RollingUpdate",
-        rollingUpdate: {
-            maxSurge: 1,
-            maxUnavailable: 0,
-        },
-    },
-    template: { /* Pod template */ },
-}
-```
-
-`maxSurge: 1` permits one extra Pod during rollout. `maxUnavailable: 0` requests that no desired replica be unavailable during the update. The cluster still needs enough capacity to schedule the additional Pod.
-
-### Pod-template annotation and ConfigMap rollout
-
-```typescript
-annotations: {
-    "demo.pulumi.com/content-version": contentVersion,
-},
-```
-
-Updating a ConfigMap object does not automatically guarantee that existing Pods restart. ConfigMap-backed volumes may update eventually, but many applications read configuration only at startup, and a rollout is often operationally clearer.
-
-Placing `contentVersion` in the Pod-template annotation changes the template hash when the value changes. Kubernetes then creates a new ReplicaSet and performs a rolling update.
-
-A production implementation can use a hash of the actual configuration content instead of a manually incremented version.
-
-### Container port and resources
-
-```typescript
-ports: [{
-    name: "http",
-    containerPort: 80,
-}],
-resources: {
-    requests: {
-        cpu: "50m",
-        memory: "64Mi",
-    },
-    limits: {
-        cpu: "200m",
-        memory: "128Mi",
-    },
-},
-```
-
-Requests influence scheduling and reserve capacity for planning. Limits constrain resource consumption. Poor values can cause unschedulable Pods, CPU throttling, or out-of-memory termination.
-
-The named port `http` lets probes and Services refer to the port semantically rather than repeating `80`.
-
-### Readiness and liveness
-
-Readiness asks whether the Pod should receive traffic. Liveness asks whether the container should be restarted.
-
-```typescript
-readinessProbe: {
-    httpGet: {
-        path: "/",
-        port: "http",
-    },
-    initialDelaySeconds: 2,
-    periodSeconds: 5,
-},
-livenessProbe: {
-    httpGet: {
-        path: "/",
-        port: "http",
-    },
-    initialDelaySeconds: 10,
-    periodSeconds: 10,
-},
-```
-
-A failed readiness probe removes the Pod from Service endpoints. A failed liveness probe can restart the container. A slow-starting application may also require a startup probe to prevent liveness checks from killing it before initialization completes.
-
-### ConfigMap volume
-
-```typescript
-volumeMounts: [{
-    name: "web-content",
-    mountPath: "/usr/share/nginx/html",
-    readOnly: true,
-}],
-volumes: [{
-    name: "web-content",
-    configMap: {
-        name: webContent.metadata.name,
-    },
-}],
-```
-
-The ConfigMap becomes files in a volume. Mounting the volume at `/usr/share/nginx/html` replaces the content served by Nginx.
-
-The reference to `webContent.metadata.name` creates a dependency. `dependsOn: [webContent]` also makes the operational relationship explicit, although the output reference already communicates a dependency.
-
-### NodePort Service
-
-```typescript
-spec: {
-    type: "NodePort",
-    selector: appLabels,
-    ports: [{
-        name: "http",
-        port: 80,
-        targetPort: "http",
-        nodePort,
-    }],
-},
-```
-
-- `port` is the Service port inside the cluster.
-- `targetPort` sends traffic to the named container port.
-- `nodePort` opens a fixed port on each Kubernetes node.
-- The Kind configuration forwards a host port to that node port.
-
-NodePort is used here to make host access explicit. In production, a `LoadBalancer`, Ingress, Gateway API resource, or internal `ClusterIP` with another exposure layer is more common.
-
-### Stack outputs
-
-```typescript
-export const namespaceName = namespace.metadata.name;
-export const deploymentName = deployment.metadata.name;
-export const serviceName = service.metadata.name;
-export const desiredReplicas = replicas;
-export const localUrl = `http://localhost:${hostPort}`;
-```
-
-Outputs are a stable stack contract. They can be read by humans, CI pipelines, or another stack.
-
----
-
-## Type Check Before Deployment
-
-```bash
-npx tsc --noEmit
-```
-
-This catches TypeScript errors without generating JavaScript files. It does not validate cluster connectivity or guarantee that every Kubernetes value is operationally correct, but it shortens the feedback loop.
-
----
-
-## Preview and Deploy
-
-Preview:
-
-```bash
-pulumi preview
-```
-
-Review the target stack, provider, namespace, resource names, replicas, NodePort, image, creates, replacements, and deletes.
-
-Deploy:
-
-```bash
-pulumi up
-```
-
-Pulumi submits objects through the Kubernetes provider. Kubernetes then creates ReplicaSets, Pods, endpoints, and other controller-owned objects that are not declared as separate Pulumi resources.
-
-Read outputs and URNs:
-
-```bash
-pulumi stack output
-pulumi stack output localUrl
-pulumi stack --show-urns
-```
-
----
-
-## Validate with kubectl
-
-Inspect the namespace and resources:
-
-```bash
-kubectl get namespace pulumi-k8s-dev
-kubectl get all -n pulumi-k8s-dev
-kubectl get configmap -n pulumi-k8s-dev
-kubectl get endpointslice -n pulumi-k8s-dev
-```
-
-Wait for the Deployment:
-
-```bash
-kubectl rollout status deployment/pulumi-nginx \
-  -n pulumi-k8s-dev
-
-kubectl get pods \
-  -n pulumi-k8s-dev \
-  -l app.kubernetes.io/name=pulumi-nginx \
-  -o wide
-```
-
-Access the application:
-
-```bash
-curl http://localhost:8080
-```
-
-Or open:
-
-```text
-http://localhost:8080
-```
-
-Inspect logs and object details:
-
-```bash
-kubectl logs -n pulumi-k8s-dev \
-  -l app.kubernetes.io/name=pulumi-nginx \
-  --tail=50
-
-kubectl describe deployment pulumi-nginx -n pulumi-k8s-dev
-kubectl describe service pulumi-nginx -n pulumi-k8s-dev
-```
-
-Pulumi output confirms the intended managed resources. `kubectl` confirms live cluster behavior. Both views are required during troubleshooting.
-
----
-
-## Scale the Deployment
-
-Change development from two replicas to four:
-
-```bash
-pulumi config set replicas 4
-pulumi preview
-pulumi up
-```
-
-Verify:
-
-```bash
-kubectl get deployment pulumi-nginx -n pulumi-k8s-dev
-kubectl get pods -n pulumi-k8s-dev \
-  -l app.kubernetes.io/name=pulumi-nginx
-```
-
-The Deployment object is updated in place. The Kubernetes Deployment controller creates additional Pods. Pulumi does not directly create each Pod because the Deployment owns that runtime behavior.
-
----
-
-## Change the Image and Observe a Rolling Update
-
-```bash
-pulumi config set image nginx:alpine
-pulumi preview
-pulumi up
-
-kubectl rollout status deployment/pulumi-nginx \
-  -n pulumi-k8s-dev
-
-kubectl rollout history deployment/pulumi-nginx \
-  -n pulumi-k8s-dev
-```
-
-Changing the container image changes the Pod template. Kubernetes creates a new ReplicaSet and gradually replaces Pods according to the rolling-update strategy.
-
-For production reproducibility, pin a controlled image version or digest. Mutable tags can point to different images without a source-code change.
-
----
-
-## Change the Web Content
-
-Update the version that appears in the Pod template:
-
-```bash
-pulumi config set contentVersion v2
-pulumi preview
-pulumi up
-
-kubectl rollout status deployment/pulumi-nginx \
-  -n pulumi-k8s-dev
-
-curl http://localhost:8080
-```
-
-The ConfigMap data changes, and the Pod-template annotation changes. The annotation change guarantees a Deployment rollout.
-
-For a detailed property-level preview:
-
-```bash
-pulumi preview --diff
-```
-
----
-
-## Introduce and Reconcile Drift
-
-Manually scale the live Deployment to six replicas:
-
-```bash
-kubectl scale deployment pulumi-nginx \
-  -n pulumi-k8s-dev \
-  --replicas=6
-
-kubectl get deployment pulumi-nginx -n pulumi-k8s-dev
-```
-
-The Pulumi program still declares four replicas. The live cluster now differs from the desired program.
-
-Refresh the Pulumi checkpoint and review the plan:
-
-```bash
-pulumi refresh
-pulumi preview
-```
-
-Restore the declared state:
-
-```bash
-pulumi up
-kubectl get deployment pulumi-nginx -n pulumi-k8s-dev
-```
-
-### Drift caused by external deletion
-
-In this lab only, delete the Service outside Pulumi:
-
-```bash
-kubectl delete service pulumi-nginx -n pulumi-k8s-dev
-pulumi refresh
-pulumi preview
-pulumi up
-```
-
-Pulumi should recreate the missing Service.
-
-Refresh records live state; update enforces the program. Neither command decides whether an emergency manual change is valid. Operators must choose whether to remediate or adopt the change.
-
----
-
-## Create a Staging Stack
-
-Create independent staging configuration:
-
-```bash
-pulumi stack init staging
-pulumi stack select staging
-
-pulumi config set kubeContext kind-pulumi-lab
-pulumi config set replicas 1
-pulumi config set image nginx:1.27-alpine
-pulumi config set contentVersion staging-v1
-pulumi config set nodePort 30081
-pulumi config set hostPort 8081
-
-pulumi preview
-pulumi up
-```
-
-The source program creates namespace `pulumi-k8s-staging` because it includes the stack name. The NodePort and host mapping are also different.
-
-Verify both environments:
-
-```bash
-kubectl get namespaces | grep pulumi-k8s
-kubectl get all -n pulumi-k8s-dev
-kubectl get all -n pulumi-k8s-staging
-
-curl http://localhost:8080
-curl http://localhost:8081
-
+pulumi whoami -v
 pulumi stack ls
 ```
 
-Return to development:
+The stack state and Kubernetes resources are managed through different paths:
 
-```bash
-pulumi stack select dev
-pulumi stack output localUrl
-pulumi config
+```text
+Pulumi Engine → Backend → Stack State
+Pulumi Engine → Kubernetes Provider → Kubernetes API Server
 ```
 
-A stack is not just an `environment` variable. It is an independent state, configuration, output, and resource-management boundary.
+If you use a PostgreSQL backend running inside Kubernetes, make sure its database connection or port-forward is active before running Pulumi commands.
+
+> Avoid storing the backend for a critical cluster only inside that same cluster. A cluster outage could make both the workloads and the state backend unavailable at the same time.
 
 ---
 
-## Pulumi State and Kubernetes State
+## Create the Project
 
-Pulumi and Kubernetes both use desired-state concepts, but they operate at different layers.
+Create the project directory:
 
-### Pulumi state
+```bash
+mkdir -p ~/pulumi-kubernetes-multi-stack
+cd ~/pulumi-kubernetes-multi-stack
+```
 
-Pulumi records the Kubernetes resources that the program owns, their inputs, outputs, URNs, dependencies, and provider references.
+Initialize a Pulumi YAML project:
 
-### Kubernetes API state
+```bash
+pulumi new yaml
+```
 
-The Kubernetes API server stores cluster objects such as Namespaces, ConfigMaps, Deployments, ReplicaSets, Pods, and Services. Controllers continuously reconcile objects such as Deployments into lower-level runtime objects.
+Use the following project name when prompted:
 
-### Example
+```text
+pulumi-kubernetes-multi-stack
+```
 
-Pulumi declares one Deployment. Kubernetes creates one or more ReplicaSets and Pods. Those controller-generated Pods are not separate top-level Pulumi resources because Pulumi manages the Deployment abstraction, not every controller-owned child object.
-
-### Server-side apply and field ownership
-
-Kubernetes supports multiple field managers. Pulumi's provider must coexist with controllers and possibly other tools. Unexpected conflicts can occur when several systems attempt to own the same fields. Avoid mixing `kubectl apply`, Helm, GitOps controllers, and Pulumi ownership of the same object unless the field-ownership and import strategy is deliberately designed.
-
-### Why Pulumi does not delete every YAML object in the cluster
-
-Pulumi destroys resources that belong to the selected stack. It does not treat the entire cluster as its exclusive desired state. Unmanaged namespaces, controller-generated Pods, system resources, and objects managed by other stacks or tools are outside that stack's ownership.
-
----
-
-## Implicit and Explicit Dependencies
-
-Many dependencies are implicit:
-
-- Namespace name output is used by namespaced resources.
-- ConfigMap name output is used by the Pod volume.
-- Deployment and Service use the same labels.
-
-Explicit `dependsOn` is useful when a real operational dependency is not expressed through an input/output reference. Avoid adding it to every resource because unnecessary dependencies reduce parallelism and can hide weak modeling.
+If the wizard creates an initial stack, it may be named `dev`. Otherwise, create both stacks explicitly in the next steps.
 
 ---
 
-## Logical Names, Kubernetes Names, and URNs
+## Repository Layout
 
-Each resource can have three different identities:
+```text
+pulumi-kubernetes-multi-stack/
+├── Pulumi.yaml
+├── Pulumi.dev.yaml
+├── Pulumi.staging.yaml
+└── .gitignore
+```
 
-1. **Pulumi logical name** — for example, `nginx-deployment`
-2. **Kubernetes physical name** — for example, `pulumi-nginx`
-3. **Pulumi URN** — a state identity containing stack, project, type, and logical name
+- `Pulumi.yaml` is the shared infrastructure program.
+- `Pulumi.dev.yaml` contains settings for the `dev` stack.
+- `Pulumi.staging.yaml` contains settings for the `staging` stack.
+- Stack settings files are not state files.
+- State is stored in the active Pulumi backend.
+- Non-sensitive stack settings may be committed to Git.
+- Sensitive values must be set with `pulumi config set --secret` or supplied through an external secret-management workflow.
 
-Changing a Kubernetes metadata name can replace an object. Changing a Pulumi logical name can appear as delete/create unless aliases or a state migration are used. Refactoring names is therefore a lifecycle operation, not merely cosmetic editing.
+---
+
+## Project Files
+
+### `Pulumi.yaml`
+
+Create the following file in the project root:
+
+```yaml
+name: pulumi-kubernetes-multi-stack
+runtime: yaml
+description: Deploy the same Kubernetes application into isolated namespaces by using independent Pulumi stacks
+
+config:
+  namespaceName:
+    type: string
+  replicas:
+    type: integer
+    default: 1
+  image:
+    type: string
+    default: nginx:1.27-alpine
+  environmentMessage:
+    type: string
+  localTestPort:
+    type: integer
+  podQuota:
+    type: string
+    default: "10"
+  cpuRequest:
+    type: string
+    default: 50m
+  memoryRequest:
+    type: string
+    default: 64Mi
+  cpuLimit:
+    type: string
+    default: 250m
+  memoryLimit:
+    type: string
+    default: 128Mi
+
+variables:
+  appLabels:
+    app.kubernetes.io/name: multi-stack-web
+    app.kubernetes.io/instance: ${pulumi.stack}
+    app.kubernetes.io/managed-by: pulumi
+    environment: ${pulumi.stack}
+
+resources:
+  k8sProvider:
+    type: pulumi:providers:kubernetes
+    properties:
+      namespace: ${namespaceName}
+    options:
+      version: 4.32.0
+
+  appNamespace:
+    type: kubernetes:core/v1:Namespace
+    properties:
+      metadata:
+        name: ${namespaceName}
+        labels: ${appLabels}
+    options:
+      provider: ${k8sProvider}
+
+  namespaceQuota:
+    type: kubernetes:core/v1:ResourceQuota
+    properties:
+      metadata:
+        name: application-quota
+        labels: ${appLabels}
+      spec:
+        hard:
+          pods: ${podQuota}
+    options:
+      provider: ${k8sProvider}
+      dependsOn:
+        - ${appNamespace}
+
+  webContent:
+    type: kubernetes:core/v1:ConfigMap
+    properties:
+      metadata:
+        name: multi-stack-web-content
+        labels: ${appLabels}
+      data:
+        index.html: |
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>Pulumi Kubernetes Multi-Stack Lab</title>
+          </head>
+          <body>
+            <h1>Pulumi Kubernetes Multi-Stack Lab</h1>
+            <p>Stack: ${pulumi.stack}</p>
+            <p>Namespace: ${namespaceName}</p>
+            <p>Message: ${environmentMessage}</p>
+          </body>
+          </html>
+    options:
+      provider: ${k8sProvider}
+      dependsOn:
+        - ${appNamespace}
+
+  webDeployment:
+    type: kubernetes:apps/v1:Deployment
+    properties:
+      metadata:
+        name: multi-stack-web
+        labels: ${appLabels}
+      spec:
+        replicas: ${replicas}
+        strategy:
+          type: RollingUpdate
+          rollingUpdate:
+            maxUnavailable: 0
+            maxSurge: 1
+        selector:
+          matchLabels:
+            app.kubernetes.io/name: multi-stack-web
+            app.kubernetes.io/instance: ${pulumi.stack}
+        template:
+          metadata:
+            labels: ${appLabels}
+          spec:
+            terminationGracePeriodSeconds: 10
+            containers:
+              - name: nginx
+                image: ${image}
+                imagePullPolicy: IfNotPresent
+                ports:
+                  - name: http
+                    containerPort: 80
+                    protocol: TCP
+                resources:
+                  requests:
+                    cpu: ${cpuRequest}
+                    memory: ${memoryRequest}
+                  limits:
+                    cpu: ${cpuLimit}
+                    memory: ${memoryLimit}
+                readinessProbe:
+                  httpGet:
+                    path: /
+                    port: http
+                  initialDelaySeconds: 2
+                  periodSeconds: 5
+                  timeoutSeconds: 2
+                  failureThreshold: 3
+                livenessProbe:
+                  httpGet:
+                    path: /
+                    port: http
+                  initialDelaySeconds: 10
+                  periodSeconds: 10
+                  timeoutSeconds: 2
+                  failureThreshold: 3
+                volumeMounts:
+                  - name: web-content
+                    mountPath: /usr/share/nginx/html
+                    readOnly: true
+            volumes:
+              - name: web-content
+                configMap:
+                  name: ${webContent.metadata.name}
+    options:
+      provider: ${k8sProvider}
+      dependsOn:
+        - ${appNamespace}
+
+  webService:
+    type: kubernetes:core/v1:Service
+    properties:
+      metadata:
+        name: multi-stack-web
+        labels: ${appLabels}
+      spec:
+        type: ClusterIP
+        selector:
+          app.kubernetes.io/name: multi-stack-web
+          app.kubernetes.io/instance: ${pulumi.stack}
+        ports:
+          - name: http
+            protocol: TCP
+            port: 80
+            targetPort: http
+    options:
+      provider: ${k8sProvider}
+      dependsOn:
+        - ${appNamespace}
+
+outputs:
+  stackName: ${pulumi.stack}
+  namespace: ${appNamespace.metadata.name}
+  deploymentName: ${webDeployment.metadata.name}
+  serviceName: ${webService.metadata.name}
+  serviceDns: ${webService.metadata.name}.${namespaceName}.svc.cluster.local
+  requestedReplicas: ${replicas}
+  localTestPort: ${localTestPort}
+  portForwardCommand: kubectl -n ${namespaceName} port-forward service/${webService.metadata.name} ${localTestPort}:80
+  testUrl: http://127.0.0.1:${localTestPort}
+```
+
+### Important notes about `Pulumi.yaml`
+
+#### Required and default configuration
+
+`namespaceName`, `environmentMessage`, and `localTestPort` have no defaults and must be configured in every stack.
+
+`replicas` is defined as an integer, so it remains a numeric value when assigned to `spec.replicas`.
+
+CPU and memory values are strings because Kubernetes receives resource quantities such as `50m`, `64Mi`, and `128Mi` as quantity strings.
+
+#### `localTestPort` is not a cluster resource
+
+`localTestPort` is used only to generate a stack output containing the appropriate `kubectl port-forward` command. It does not create or reserve a port inside Kubernetes.
+
+Both Services listen on port `80`. They do not conflict because they exist in different namespaces. Local port `8081` is used for `dev`, and local port `8082` is used for `staging` so both can be tested simultaneously.
+
+#### Built-in variables
+
+`${pulumi.stack}` resolves to the selected stack name during execution. It is used in labels, selectors, and the generated HTML page.
+
+#### Explicit provider
+
+The provider defines the default namespace for namespaced resources:
+
+```yaml
+k8sProvider:
+  type: pulumi:providers:kubernetes
+  properties:
+    namespace: ${namespaceName}
+```
+
+Because no kubeconfig is specified directly, the provider reads `KUBECONFIG` or the default `~/.kube/config`.
+
+Namespace selection follows this practical priority:
+
+1. `metadata.namespace` set directly on a resource;
+2. the default namespace configured on the provider;
+3. the namespace from the active kubeconfig context.
+
+This project intentionally omits `metadata.namespace` from namespaced resources to demonstrate provider-scoped namespace configuration.
+
+#### Namespace resource
+
+A Namespace is cluster-scoped. The provider's default namespace does not affect the Namespace resource itself. Its physical name comes directly from `${namespaceName}`.
+
+#### ResourceQuota
+
+The ResourceQuota limits the number of Pods in each namespace. It has an explicit dependency on the Namespace because there is no direct Namespace output used in its properties from which Pulumi could infer the dependency.
+
+#### ConfigMap
+
+The same ConfigMap name is used in both environments. This is valid because each ConfigMap exists in a different namespace.
+
+The HTML content includes stack-specific values, making it easy to confirm which environment answered an HTTP request.
+
+#### Deployment selector and pod labels
+
+The Deployment selector must exactly match the labels on the pod template. A mismatch can cause Kubernetes to reject the Deployment or cause the Service to have no matching endpoints.
+
+#### RollingUpdate
+
+```yaml
+maxUnavailable: 0
+maxSurge: 1
+```
+
+This configuration allows Kubernetes to create an additional Pod before terminating an old Ready Pod during a pod-template update.
+
+#### Resource requests and limits
+
+Requests influence scheduling. Limits constrain resource consumption.
+
+#### Readiness and liveness probes
+
+- The readiness probe determines when a Pod may receive Service traffic.
+- The liveness probe determines whether the container should be restarted.
+- Pulumi does not execute these probes. Pulumi sends the Deployment specification to the API server, and the kubelet executes the probes.
+
+#### ConfigMap volume dependency
+
+The Deployment references `${webContent.metadata.name}`. This creates an implicit dependency from the Deployment to the ConfigMap.
+
+#### Service and EndpointSlice
+
+The ClusterIP Service selects Ready Pods using labels. `targetPort: http` refers to the named container port.
+
+The full in-cluster DNS names are:
+
+```text
+multi-stack-web.pulumi-dev.svc.cluster.local
+multi-stack-web.pulumi-staging.svc.cluster.local
+```
+
+---
+
+### `Pulumi.dev.yaml`
+
+The file is generated by `pulumi config set` commands. Its exact encryption metadata may differ if secret values are later added.
+
+```yaml
+config:
+  pulumi-kubernetes-multi-stack:namespaceName: pulumi-dev
+  pulumi-kubernetes-multi-stack:replicas: 1
+  pulumi-kubernetes-multi-stack:image: nginx:1.27-alpine
+  pulumi-kubernetes-multi-stack:environmentMessage: Development environment managed by Pulumi
+  pulumi-kubernetes-multi-stack:localTestPort: 8081
+  pulumi-kubernetes-multi-stack:podQuota: "10"
+  pulumi-kubernetes-multi-stack:cpuRequest: 50m
+  pulumi-kubernetes-multi-stack:memoryRequest: 64Mi
+  pulumi-kubernetes-multi-stack:cpuLimit: 250m
+  pulumi-kubernetes-multi-stack:memoryLimit: 128Mi
+```
+
+---
+
+### `Pulumi.staging.yaml`
+
+```yaml
+config:
+  pulumi-kubernetes-multi-stack:namespaceName: pulumi-staging
+  pulumi-kubernetes-multi-stack:replicas: 2
+  pulumi-kubernetes-multi-stack:image: nginx:1.27-alpine
+  pulumi-kubernetes-multi-stack:environmentMessage: Staging environment managed by Pulumi
+  pulumi-kubernetes-multi-stack:localTestPort: 8082
+  pulumi-kubernetes-multi-stack:podQuota: "20"
+  pulumi-kubernetes-multi-stack:cpuRequest: 100m
+  pulumi-kubernetes-multi-stack:memoryRequest: 128Mi
+  pulumi-kubernetes-multi-stack:cpuLimit: 500m
+  pulumi-kubernetes-multi-stack:memoryLimit: 256Mi
+```
+
+---
+
+### `.gitignore`
+
+```gitignore
+# Pulumi exported state files
+*-state.json
+*.state.json
+
+# Local temporary files
+*.tmp
+*.log
+
+# Local environment files
+.env
+.env.*
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+
+# OS files
+.DS_Store
+Thumbs.db
+```
+
+Do not ignore `Pulumi.dev.yaml` and `Pulumi.staging.yaml` when they contain only non-sensitive configuration. Secret values configured with `--secret` are encrypted in stack settings, but repository and organizational security policies must still be followed.
+
+---
+
+## Create and Configure the Stacks
+
+### Development stack
+
+Create the stack:
+
+```bash
+pulumi stack init dev
+```
+
+Configure it:
+
+```bash
+pulumi config set namespaceName pulumi-dev --stack dev
+pulumi config set replicas 1 --stack dev
+pulumi config set image nginx:1.27-alpine --stack dev
+pulumi config set environmentMessage "Development environment managed by Pulumi" --stack dev
+pulumi config set localTestPort 8081 --stack dev
+pulumi config set podQuota "10" --stack dev
+pulumi config set cpuRequest 50m --stack dev
+pulumi config set memoryRequest 64Mi --stack dev
+pulumi config set cpuLimit 250m --stack dev
+pulumi config set memoryLimit 128Mi --stack dev
+```
+
+Review the configuration:
+
+```bash
+pulumi config --stack dev
+cat Pulumi.dev.yaml
+```
+
+`pulumi stack init` creates an empty stack in the active backend. It does not create Kubernetes resources. `pulumi config set` writes stack settings; the desired resource graph is evaluated only when `pulumi preview` or `pulumi up` runs.
+
+### Staging stack
+
+Create the stack:
+
+```bash
+pulumi stack init staging
+```
+
+Configure it:
+
+```bash
+pulumi config set namespaceName pulumi-staging --stack staging
+pulumi config set replicas 2 --stack staging
+pulumi config set image nginx:1.27-alpine --stack staging
+pulumi config set environmentMessage "Staging environment managed by Pulumi" --stack staging
+pulumi config set localTestPort 8082 --stack staging
+pulumi config set podQuota "20" --stack staging
+pulumi config set cpuRequest 100m --stack staging
+pulumi config set memoryRequest 128Mi --stack staging
+pulumi config set cpuLimit 500m --stack staging
+pulumi config set memoryLimit 256Mi --stack staging
+```
+
+Review the stacks and staging configuration:
+
+```bash
+pulumi stack ls
+pulumi config --stack staging
+cat Pulumi.staging.yaml
+```
+
+The two stack settings files do not represent two copies of the application program. `Pulumi.yaml` remains the single shared program.
+
+---
+
+## Preview and Deploy Development
+
+Before creating resources, verify the active Kubernetes context again:
+
+```bash
+kubectl config current-context
+kubectl config view --minify
+```
+
+Preview the `dev` stack:
+
+```bash
+pulumi preview --stack dev --diff
+```
+
+During preview:
+
+```text
+Pulumi.yaml + Pulumi.dev.yaml
+        ↓
+YAML Runtime resolves config and ${pulumi.stack}
+        ↓
+Pulumi Engine builds the resource graph
+        ↓
+Engine reads dev state from the backend
+        ↓
+Kubernetes Provider performs Check and Diff
+        ↓
+Preview prints the planned create operations
+```
+
+Preview does not create Kubernetes resources.
+
+Deploy development:
+
+```bash
+pulumi up --stack dev
+```
+
+After confirmation, the Engine executes operations according to the dependency graph:
+
+1. The Kubernetes provider is configured.
+2. The `pulumi-dev` Namespace is created.
+3. The ResourceQuota and ConfigMap become creatable.
+4. The Deployment is created after its required dependencies are available.
+5. The Service is created.
+6. Kubernetes controllers create the ReplicaSet and Pod.
+7. Pulumi records the completed checkpoint in the `dev` stack state.
+
+The Deployment flow inside Kubernetes is:
+
+```text
+Pulumi Kubernetes Provider sends Deployment object
+        ↓
+API Server authenticates and admits the object
+        ↓
+Deployment Controller creates a ReplicaSet
+        ↓
+ReplicaSet Controller creates a Pod
+        ↓
+Scheduler selects a Node
+        ↓
+Kubelet starts the Nginx container
+        ↓
+Readiness probe succeeds
+        ↓
+Service EndpointSlice includes the Pod
+```
+
+---
+
+## Validate Development
+
+Display stack outputs:
+
+```bash
+pulumi stack output --stack dev
+```
+
+Validate the Namespace and resources:
+
+```bash
+kubectl get namespace pulumi-dev
+kubectl -n pulumi-dev get resourcequota
+kubectl -n pulumi-dev get configmap
+kubectl -n pulumi-dev get deployment,replicaset,pod,service
+kubectl -n pulumi-dev rollout status deployment/multi-stack-web
+kubectl -n pulumi-dev get endpointslice \
+  -l kubernetes.io/service-name=multi-stack-web
+```
+
+Expected initial state:
+
+- Namespace `pulumi-dev` exists.
+- Deployment reports `1/1` Ready.
+- One Pod is Running and Ready.
+- The EndpointSlice contains a Pod address.
+- The Service exists on port `80`.
+
+A Pod may be `Running` but not yet `Ready`. A not-ready Pod should not be included as a normal Service endpoint.
+
+Diagnostic commands:
+
+```bash
+kubectl -n pulumi-dev describe deployment multi-stack-web
+kubectl -n pulumi-dev describe pod \
+  -l app.kubernetes.io/name=multi-stack-web
+kubectl -n pulumi-dev logs deployment/multi-stack-web
+```
+
+### HTTP test from the local machine
+
+In terminal 1:
+
+```bash
+kubectl -n pulumi-dev port-forward service/multi-stack-web 8081:80
+```
+
+In terminal 2:
+
+```bash
+curl -s http://127.0.0.1:8081
+```
+
+The HTML response should include:
+
+```text
+Stack: dev
+Namespace: pulumi-dev
+Message: Development environment managed by Pulumi
+```
+
+The port-forward process is temporary. It is not a Kubernetes resource and is not stored in Pulumi state.
+
+### In-cluster DNS test
+
+Run a temporary curl Pod:
+
+```bash
+kubectl -n pulumi-dev run curl-test \
+  --rm -it \
+  --restart=Never \
+  --image=curlimages/curl \
+  -- http://multi-stack-web
+```
+
+This Pod is created outside Pulumi and is not present in Pulumi state. The `--rm` option deletes it after completion.
+
+---
+
+## Preview and Deploy Staging
+
+Preview and deploy the same program with staging configuration:
+
+```bash
+pulumi preview --stack staging --diff
+pulumi up --stack staging
+```
+
+The same `Pulumi.yaml` is evaluated again, but the configuration and state belong to `staging`.
+
+The staging Engine run does not see the `dev` resources as resources in the staging state and must not update or delete them.
+
+---
+
+## Validate Staging
+
+Display outputs and resources:
+
+```bash
+pulumi stack output --stack staging
+kubectl get namespace pulumi-staging
+kubectl -n pulumi-staging get deployment,pod,service,resourcequota
+kubectl -n pulumi-staging rollout status deployment/multi-stack-web
+```
+
+In terminal 1:
+
+```bash
+kubectl -n pulumi-staging port-forward service/multi-stack-web 8082:80
+```
+
+In terminal 2:
+
+```bash
+curl -s http://127.0.0.1:8082
+```
+
+The response should include:
+
+```text
+Stack: staging
+Namespace: pulumi-staging
+Message: Staging environment managed by Pulumi
+```
+
+The initial staging Deployment should have two replicas and larger CPU and memory settings than development.
+
+---
+
+## Prove Stack Independence
+
+List both Pulumi stacks and compare the two environments:
+
+```bash
+pulumi stack ls
+
+kubectl get namespace pulumi-dev pulumi-staging
+kubectl -n pulumi-dev get deployment multi-stack-web
+kubectl -n pulumi-staging get deployment multi-stack-web
+
+kubectl -n pulumi-dev get pods \
+  -l app.kubernetes.io/name=multi-stack-web
+kubectl -n pulumi-staging get pods \
+  -l app.kubernetes.io/name=multi-stack-web
+```
+
+The logical resource name is the same in both stacks, for example `webDeployment`. The Pulumi URNs differ because each URN includes the stack name. The physical Kubernetes IDs also differ because they include different namespaces.
+
+```text
+URN in dev:
+...::dev::kubernetes:apps/v1:Deployment::webDeployment
+
+Physical ID:
+pulumi-dev/multi-stack-web
+
+URN in staging:
+...::staging::kubernetes:apps/v1:Deployment::webDeployment
+
+Physical ID:
+pulumi-staging/multi-stack-web
+```
+
+---
+
+## Inspect Stack State
+
+Export each stack for controlled inspection:
+
+```bash
+pulumi stack export --stack dev --file dev-state.json
+pulumi stack export --stack staging --file staging-state.json
+```
+
+Inspect resource identity fields:
+
+```bash
+jq '.deployment.resources[] | {urn, type, id}' dev-state.json
+jq '.deployment.resources[] | {urn, type, id}' staging-state.json
+```
+
+> Exported state may contain sensitive outputs or metadata. Do not commit exported state to Git. Use export for controlled backup, migration, and troubleshooting, not as a normal state-editing workflow.
+
+Delete the temporary exports after the exercise:
+
+```bash
+rm -f dev-state.json staging-state.json
+```
+
+---
+
+## Update Only Development
+
+Change the development replica count and environment message:
+
+```bash
+pulumi config set replicas 3 --stack dev
+pulumi config set environmentMessage \
+  "Development environment - version 2" \
+  --stack dev
+```
+
+Preview and apply only `dev`:
+
+```bash
+pulumi preview --stack dev --diff
+pulumi up --stack dev
+```
+
+Expected behavior:
+
+- `spec.replicas` changes from `1` to `3`.
+- The ConfigMap content changes.
+- The `staging` stack does not change.
+- Updating only ConfigMap data does not necessarily cause a Deployment rollout because the pod template is unchanged.
+- Kubernetes eventually updates projected ConfigMap volume files.
+- Nginx reads the updated file on subsequent requests.
+
+Confirm independence:
+
+```bash
+kubectl -n pulumi-dev get deployment multi-stack-web
+kubectl -n pulumi-staging get deployment multi-stack-web
+
+curl -s http://127.0.0.1:8081
+curl -s http://127.0.0.1:8082
+```
+
+Expected result:
+
+- Development has three replicas and the version 2 message.
+- Staging remains at two replicas with its original message.
+
+---
+
+## Trigger a Rolling Update in Staging
+
+Changing a resource limit changes the Deployment pod template and triggers a new ReplicaSet.
+
+Update the staging memory limit:
+
+```bash
+pulumi config set memoryLimit 384Mi --stack staging
+pulumi preview --stack staging --diff
+pulumi up --stack staging
+```
+
+Observe the rollout:
+
+```bash
+kubectl -n pulumi-staging rollout status deployment/multi-stack-web
+kubectl -n pulumi-staging get replicaset
+kubectl -n pulumi-staging get pods -w
+```
+
+Expected behavior:
+
+1. Preview displays the memory limit change.
+2. The Deployment controller creates a new ReplicaSet.
+3. New Pods are started with the updated pod template.
+4. With `maxUnavailable: 0`, existing Ready Pods remain until replacements are Ready.
+5. Old Pods are terminated after the new Pods become Ready.
+
+Pulumi manages the Deployment object, not the child Pods directly.
+
+---
+
+## Drift Detection and Recovery
+
+Drift occurs when the actual provider state differs from the current Pulumi state and declared program.
+
+### Create controlled drift
+
+Scale the development Deployment manually:
+
+```bash
+kubectl -n pulumi-dev scale deployment/multi-stack-web --replicas=5
+kubectl -n pulumi-dev get deployment multi-stack-web
+```
+
+Pulumi configuration still declares three replicas, but Kubernetes now has five.
+
+### Detect drift without modifying state
+
+```bash
+pulumi refresh --preview-only --stack dev
+```
+
+`refresh --preview-only` queries the provider and displays differences without changing the Pulumi state or the Kubernetes cluster.
+
+### Remediation: restore the cluster to the declared configuration
+
+Use the Pulumi program as the source of truth:
+
+```bash
+pulumi preview --refresh --stack dev --diff
+pulumi up --refresh --stack dev
+```
+
+The `--refresh` option first reads the actual provider state. The subsequent update reapplies the configured replica count of three.
+
+### Adoption: accept a valid manual change
+
+If five replicas are the new approved value, update both Pulumi state and stack configuration:
+
+```bash
+pulumi refresh --stack dev
+pulumi config set replicas 5 --stack dev
+pulumi preview --stack dev
+```
+
+The final preview should report no changes.
+
+> Running only `pulumi refresh` is not enough to adopt a desired manual configuration permanently. If the program still declares a different value, the next `pulumi up` may restore the program value.
+
+---
+
+## Why Deleting a Pod Is Usually Not Persistent Pulumi Drift
+
+Delete one staging Pod:
+
+```bash
+POD_NAME=$(kubectl -n pulumi-staging get pod \
+  -l app.kubernetes.io/name=multi-stack-web \
+  -o jsonpath='{.items[0].metadata.name}')
+
+kubectl -n pulumi-staging delete pod "$POD_NAME"
+kubectl -n pulumi-staging get pods -w
+```
+
+The Deployment controller immediately creates a replacement Pod because the Deployment still declares two replicas.
+
+Pulumi manages the Deployment. The Pod is a child resource reconciled by Kubernetes. Once Kubernetes restores the Deployment's desired replica state, Pulumi may see no persistent drift in the managed Deployment resource.
+
+```text
+Pulumi reconciliation:
+Pulumi Program → Deployment object
+
+Kubernetes reconciliation:
+Deployment → ReplicaSet → Pods
+```
+
+Understanding these two reconciliation loops is essential during troubleshooting.
+
+---
+
+## Provider and Namespace Behavior
+
+### Why each stack gets its own provider resource
+
+`k8sProvider` exists independently inside each stack state.
+
+```text
+dev provider     → default namespace pulumi-dev
+staging provider → default namespace pulumi-staging
+```
+
+The logical provider name is the same, but the URN is different because the stack name is different.
+
+### Benefits of an explicit provider
+
+- The intended namespace is visible and reviewable in the program.
+- Provider version can be pinned.
+- Resources explicitly identify which provider they use.
+- Advanced projects can use multiple providers for multiple clusters or namespaces.
+- The configuration is less dependent on an accidentally changed default namespace.
+
+The cluster is still selected through kubeconfig in this project. For a real multi-cluster design, configure the provider's kubeconfig or context explicitly as well.
+
+### Why `metadata.namespace` is omitted
+
+This project uses the provider default namespace to demonstrate provider-scoped configuration.
+
+Some production teams prefer explicit `metadata.namespace` on every namespaced resource. Others prefer one namespace-scoped provider to reduce repetition. Select one policy, document it, and enforce it consistently.
+
+---
+
+## Dependency Graph
+
+Pulumi builds a dependency graph for ordering and parallel execution.
+
+| Relationship | Dependency type | Reason |
+|---|---|---|
+| Deployment → ConfigMap | Implicit | The Deployment uses `${webContent.metadata.name}`. |
+| ResourceQuota → Namespace | Explicit | No direct Namespace output is used in its properties. |
+| Service → Deployment | No hard dependency required | A Service can exist before matching Pods become Ready. |
+| Provider → kubeconfig | Provider configuration | The provider reads context and credentials during configuration. |
+
+Do not add `dependsOn` to every resource. Unnecessary dependencies reduce parallelism and make the graph harder to reason about. Add explicit dependencies only when a real ordering requirement cannot be inferred from resource inputs and outputs.
+
+---
+
+## What Namespace Isolation Does and Does Not Provide
+
+| Requirement | Is Namespace alone sufficient? | Additional control |
+|---|---|---|
+| Reuse names for namespaced resources | Yes | Namespace scope |
+| Limit Pod count | No | ResourceQuota |
+| Default requests and limits | No | LimitRange |
+| Separate user permissions | No | RBAC |
+| Block traffic between environments | No | NetworkPolicy |
+| Separate nodes or runtimes | No | NodeSelector, taints, RuntimeClass |
+| Full failure-domain separation | No | Separate clusters or multi-cluster architecture |
+
+This project implements a Pod-count ResourceQuota. Future extensions may add LimitRange, RoleBinding, and NetworkPolicy resources driven by the same stack configuration.
+
+---
+
+## Optional Resource Protection
+
+Pulumi's `protect` resource option prevents accidental deletion.
+
+Example for the Namespace:
+
+```yaml
+appNamespace:
+  type: kubernetes:core/v1:Namespace
+  properties:
+    metadata:
+      name: ${namespaceName}
+      labels: ${appLabels}
+  options:
+    provider: ${k8sProvider}
+    protect: true
+```
+
+After adding `protect`, run an update so the option is recorded in state:
+
+```bash
+pulumi up --stack dev
+```
+
+A later destroy will stop when it reaches the protected resource.
+
+To remove it safely:
+
+1. Change `protect` to `false` or remove the option.
+2. Run `pulumi up` so state records the change.
+3. Run `pulumi destroy`.
+
+Do not delete stack state merely to bypass protection.
 
 ---
 
 ## Troubleshooting
 
-Use a layered workflow:
-
-1. Docker and Kind
-2. kubeconfig and context
-3. Kubernetes API connectivity
-4. Pulumi project and active stack
-5. Provider configuration
-6. Object specification
-7. Controller status
-8. Pod events, logs, and probes
-9. Service selectors and endpoints
-10. Host-to-node port mapping
-
-### Kubernetes context not found
+### Pulumi is targeting the wrong cluster
 
 ```bash
-kubectl config get-contexts
-kubectl config view
-pulumi config get kubeContext
+kubectl config current-context
+kubectl config view --minify
+pulumi preview --stack dev --diff
 ```
 
-Confirm that `kind-pulumi-lab` exists and that the stack value exactly matches it. The explicit provider fails if the configured context is missing.
+The explicit provider selects the namespace, but the cluster still comes from kubeconfig. Always verify the context before `pulumi up`.
 
-### Connection refused or cluster unreachable
+### Namespace already exists
+
+If a Namespace already exists and is managed elsewhere, Pulumi may receive an `AlreadyExists` error.
+
+Choose one ownership model:
+
+- import the existing Namespace into the stack;
+- remove Namespace management from this stack;
+- manage shared namespaces in a separate platform stack.
+
+Do not delete an existing Namespace without understanding its current owner and workloads.
+
+### Pod is in `ImagePullBackOff`
 
 ```bash
-docker ps --filter name=pulumi-lab
-kind get clusters
-kubectl cluster-info --context kind-pulumi-lab
+kubectl -n pulumi-dev describe pod \
+  -l app.kubernetes.io/name=multi-stack-web
+kubectl -n pulumi-dev get events --sort-by=.lastTimestamp
 ```
-
-If the Kind container is absent, recreate the cluster. If kubeconfig points to an obsolete endpoint, regenerate or repair the context.
-
-### `localhost:8080` does not respond
-
-Inspect every hop:
-
-```bash
-kubectl get service pulumi-nginx -n pulumi-k8s-dev -o yaml
-kubectl get endpointslice -n pulumi-k8s-dev
-kubectl get pods -n pulumi-k8s-dev -o wide
-curl -v http://localhost:8080
-```
-
-Confirm:
-
-- The Service is `NodePort`.
-- `nodePort` is `30080`.
-- The Kind mapping forwards host `8080` to node `30080`.
-- EndpointSlices contain Ready Pod addresses.
-- Service selectors match Pod labels.
-
-Use port-forward as a diagnostic bypass:
-
-```bash
-kubectl port-forward \
-  -n pulumi-k8s-dev \
-  service/pulumi-nginx \
-  8088:80
-```
-
-If `http://localhost:8088` works, the application and Service are probably healthy and the problem is in the NodePort/Kind host mapping.
-
-### Port already allocated or NodePort conflict
-
-```bash
-kubectl get services -A
-
-# Linux or macOS example
-lsof -i :8080
-```
-
-A host port can be occupied by another process. A NodePort can already be assigned to another Service. Select unused values and keep Kind configuration and stack configuration aligned.
-
-### `ImagePullBackOff`
-
-```bash
-kubectl describe pod -n pulumi-k8s-dev <pod-name>
-kubectl get events -n pulumi-k8s-dev \
-  --sort-by=.metadata.creationTimestamp
-```
-
-Check image spelling, tag existence, registry access, proxy/DNS, rate limits, and image-pull credentials.
-
-### Pod is Running but not Ready
-
-```bash
-kubectl describe pod -n pulumi-k8s-dev <pod-name>
-kubectl logs -n pulumi-k8s-dev <pod-name>
-kubectl exec -n pulumi-k8s-dev <pod-name> -- \
-  wget -qO- http://127.0.0.1/
-```
-
-Check readiness path, named port, startup timing, mounted content, Nginx configuration, and events.
-
-### Update waits or times out
-
-```bash
-kubectl get pods -n pulumi-k8s-dev -w
-kubectl describe deployment pulumi-nginx -n pulumi-k8s-dev
-kubectl get events -n pulumi-k8s-dev \
-  --sort-by=.lastTimestamp
-```
-
-Common causes include insufficient capacity for `maxSurge`, failed readiness probes, image pulls, resource limits, and unschedulable Pods.
-
-### ConfigMap changed but Pods did not restart
-
-A ConfigMap change alone is not a Deployment template change. Increment `contentVersion`, or compute and apply a content checksum to the Pod-template annotation.
-
-### Unexpected replacement or deletion in preview
 
 Check:
 
-- Active stack
-- Kubernetes context
-- Logical resource-name changes
-- Metadata name changes
-- Namespace changes
-- Immutable Kubernetes fields
-- Provider version changes
-- Resource import/ownership changes
+- image name and tag;
+- registry authentication;
+- cluster DNS and internet access;
+- registry rate limits;
+- image architecture compatibility.
 
-Do not approve a replacement until its operational impact is understood.
+Pulumi may successfully create the Deployment object while the workload fails to become Ready.
+
+### Service does not return a response
+
+```bash
+kubectl -n pulumi-dev get pod --show-labels
+kubectl -n pulumi-dev describe service multi-stack-web
+kubectl -n pulumi-dev get endpointslice \
+  -l kubernetes.io/service-name=multi-stack-web
+```
+
+Compare the Service selector with Pod labels. Confirm readiness probes are passing. A Running but NotReady Pod does not normally receive Service traffic.
+
+### ResourceQuota prevents Pod creation
+
+```bash
+kubectl -n pulumi-dev describe resourcequota application-quota
+kubectl -n pulumi-dev get events --sort-by=.lastTimestamp
+```
+
+If replicas exceed the configured Pod quota, the ReplicaSet cannot create all requested Pods.
+
+### ConfigMap changed but the page did not update immediately
+
+Projected ConfigMap volumes are eventually consistent and may take time to update.
+
+Additional considerations:
+
+- A `subPath` mount does not receive automatic ConfigMap file updates.
+- Some applications cache files.
+- Some applications read configuration only at startup.
+- Such applications may require a controlled rollout after ConfigMap changes.
+
+### Namespace is stuck in `Terminating`
+
+```bash
+kubectl get namespace pulumi-dev -o yaml
+kubectl api-resources --verbs=list --namespaced -o name | \
+  xargs -n 1 kubectl get -n pulumi-dev --ignore-not-found
+```
+
+Inspect remaining namespaced resources and finalizers. Do not remove finalizers blindly; doing so may skip required external cleanup.
+
+### Provider plugin problems
+
+Check provider installation and preview output:
+
+```bash
+pulumi plugin ls
+pulumi preview --stack dev --diff
+```
+
+If required, install the pinned provider version:
+
+```bash
+pulumi plugin install resource kubernetes 4.32.0
+```
+
+### Missing required stack configuration
+
+List stack configuration:
+
+```bash
+pulumi config --stack dev
+```
+
+Set missing values using the commands in [Create and Configure the Stacks](#create-and-configure-the-stacks).
+
+### Wrong stack selected
+
+Prefer explicit `--stack` in scripts and CI/CD:
+
+```bash
+pulumi preview --stack dev
+pulumi up --stack dev
+```
+
+This reduces the risk of updating the wrong environment.
 
 ---
 
-## Clean Up
+## Cleanup
+
+Destroy development first and verify staging remains:
+
+```bash
+pulumi preview --stack dev --destroy
+pulumi destroy --stack dev
+
+kubectl get namespace pulumi-dev pulumi-staging
+kubectl -n pulumi-staging get deployment,pod,service
+```
+
+The staging stack and namespace should remain healthy.
+
+Remove the empty development stack:
+
+```bash
+pulumi stack rm dev
+```
 
 Destroy staging:
 
 ```bash
-pulumi stack select staging
-pulumi destroy
+pulumi preview --stack staging --destroy
+pulumi destroy --stack staging
+```
+
+Remove the empty staging stack:
+
+```bash
 pulumi stack rm staging
 ```
 
-Destroy development:
+Safe cleanup order:
 
-```bash
-pulumi stack select dev
+```text
 pulumi destroy
-pulumi stack rm dev
+        ↓
+Verify provider resources were removed
+        ↓
+pulumi stack rm
 ```
 
-Confirm that stack-managed namespaces are gone:
+Do not remove stack state while real resources are still expected to be managed by that stack.
 
-```bash
-kubectl get namespaces | grep pulumi-k8s || true
-```
+---
 
-Then delete the cluster:
+## Production Considerations
 
-```bash
-cd ..
-kind delete cluster --name pulumi-lab
-kind get clusters
-kubectl config get-contexts
-```
+This project is designed as a teaching lab. For production environments, consider the following:
 
-Destroy application resources before deleting the cluster. If the cluster is deleted first, Pulumi cannot reach the API server to perform ordinary deletions, and the stack can retain stale resource state that requires recovery work.
+- Use immutable image tags or image digests instead of mutable tags such as `latest`.
+- Upgrade the Kubernetes provider through a controlled process and preview every stack.
+- Use a shared, backed-up backend with appropriate locking and access control.
+- Keep critical state outside the failure domain of the resources it manages.
+- Add RBAC, NetworkPolicy, LimitRange, PodDisruptionBudget, Ingress or Gateway API, TLS, monitoring, alerting, and audit controls.
+- Store non-sensitive stack configuration in Git.
+- Store credentials and tokens as Pulumi secrets or in an external secret manager.
+- Explicitly specify `--stack` in automation.
+- Use `pulumi preview --refresh` and human review before sensitive changes.
+- Do not assume namespaces provide full security or failure isolation.
+- Sensitive production environments may require separate clusters, accounts, subscriptions, or projects.
+- Use an external high-availability backend if the Kubernetes cluster itself is a critical managed target.
 
 ---
 
 ## Exercises
 
-### Add an environment variable
-
-Create an environment value in Pulumi configuration:
-
-```bash
-pulumi config set environmentName development
-```
-
-Read it in TypeScript and pass it to the container using `env`.
-
-### Add a startup probe
-
-Add a startup probe so a slow application is protected from premature liveness failure.
-
-### Add a ResourceQuota
-
-Create a `core.v1.ResourceQuota` in each stack namespace to constrain aggregate CPU, memory, and object counts.
-
-### Add a ServiceAccount
-
-Create a dedicated ServiceAccount, assign it to the Pod template, and set:
-
-```typescript
-automountServiceAccountToken: false
-```
-
-unless the workload genuinely requires Kubernetes API credentials.
-
-### Replace NodePort with ClusterIP
-
-Change the Service to `ClusterIP` and access it with:
-
-```bash
-kubectl port-forward -n pulumi-k8s-dev service/pulumi-nginx 8088:80
-```
-
-Explain why ClusterIP is safer as a default for internal services.
-
-### Build a ComponentResource
-
-Encapsulate Namespace, ConfigMap, Deployment, and Service in a reusable Pulumi component with typed arguments and registered outputs.
-
-### Create a third stack
-
-Add a `test` stack with a unique namespace, NodePort, and Kind host mapping. Explain every collision boundary.
-
-### Add tests
-
-Use Pulumi mocks to verify that:
-
-- The Deployment has the required labels.
-- Resource requests and limits exist.
-- The Service selector matches the Pod labels.
-- The namespace name contains the stack name.
-- The container does not use an uncontrolled image tag.
+1. Create a `qa` stack in namespace `pulumi-qa` with two replicas.
+2. Add a `servicePort` stack configuration value and make the Service port configurable.
+3. Add a `LimitRange` to define default requests and limits in each namespace.
+4. Add a `NetworkPolicy` that accepts ingress only from Pods with an approved label.
+5. Change the staging Service from `ClusterIP` to `NodePort`, inspect the preview, and explain the security impact before applying it.
+6. Import a pre-existing Namespace with `pulumi import` and document the difference between import and create.
+7. Change the Service manually, detect drift with `refresh --preview-only`, and decide between remediation and adoption.
+8. Read service outputs from another Pulumi project with a StackReference.
+9. Configure a second Kubernetes provider that targets another cluster or context.
+10. Add a protected production Namespace and document the safe unprotect-and-destroy procedure.
 
 ---
 
-## Review Questions
+## Final Verification Checklist
 
-1. Why is an explicit Kubernetes provider safer than using the current context implicitly?
-2. Why does the Service select Pods rather than the Deployment object?
-3. What happens when a Deployment selector does not match its Pod-template labels?
-4. Why can a ConfigMap update require a Pod-template checksum or version annotation?
-5. How do readiness and liveness probes differ?
-6. What is the operational effect of `maxUnavailable: 0`?
-7. Why does a Pulumi Deployment resource produce Kubernetes Pods that are not separate Pulumi resources?
-8. Why can `pulumi refresh` change recorded state without restoring desired state?
-9. What must remain unique when multiple stacks share one Kind cluster?
-10. Why should the application stacks be destroyed before the cluster?
+- [ ] Pulumi is connected to the intended backend.
+- [ ] `kubectl` is connected to the intended Kubernetes context.
+- [ ] Required RBAC permissions return `yes`.
+- [ ] Both `dev` and `staging` stacks exist.
+- [ ] `Pulumi.dev.yaml` and `Pulumi.staging.yaml` have different settings.
+- [ ] `pulumi-dev` and `pulumi-staging` namespaces exist.
+- [ ] Development initially has one replica.
+- [ ] Staging initially has two replicas.
+- [ ] Each HTTP page displays the correct stack, namespace, and message.
+- [ ] Updating `dev` does not change `staging`.
+- [ ] Updating the staging pod template creates a RollingUpdate.
+- [ ] Drift is detected with `pulumi refresh --preview-only`.
+- [ ] Remediation restores the declared configuration.
+- [ ] Adoption updates both state and configuration.
+- [ ] Deleting a Pod is not confused with persistent Deployment drift.
+- [ ] Destroying one stack does not delete the other environment.
+- [ ] Exported state files are not committed to Git.
 
 ---
 
-## Key Takeaways
+## Mental Model
 
-- Pulumi creates Kubernetes API objects; Kubernetes controllers operate those objects continuously.
-- An explicit provider makes cluster targeting deliberate and reviewable.
-- Stack-specific namespaces and configuration enable one program to manage multiple environments.
-- Labels and selectors are the logical wiring between Deployment Pods and Services.
-- ConfigMaps separate content from images, but they are not secret stores.
-- Resource requests, limits, and probes are part of production-quality workload design.
-- Kind host mapping and Kubernetes NodePort configuration must match exactly.
-- Scaling and image changes demonstrate declarative updates and Kubernetes rolling reconciliation.
-- Refresh observes live state; update moves resources toward the program's desired state.
-- Pulumi state, Kubernetes API state, and controller-generated runtime objects are related but distinct.
-- Cleanup order matters because stateful tools need access to the target API to delete managed resources cleanly.
+```text
+One Project = one shared infrastructure program
+        ↓
+Each Stack = independent config + independent state
+        ↓
+Stack Config selects namespace, replicas, and policies
+        ↓
+Explicit Provider selects Kubernetes behavior and default namespace
+        ↓
+Pulumi Engine computes the graph and calls the Kubernetes Provider
+        ↓
+Kubernetes API stores the declared objects
+        ↓
+Kubernetes controllers create and reconcile child resources
+        ↓
+Updates, drift checks, and destroy operations happen per stack
+```
+
+Multi-environment does not require multiple copies of the program. The shared program defines common intent, while stack configuration introduces controlled differences. Pulumi stacks provide independent infrastructure lifecycles, and Kubernetes namespaces provide namespaced resource scope.
 
 ---
 
 ## Official References
 
-- Pulumi Kubernetes Provider: <https://www.pulumi.com/registry/packages/kubernetes/>
-- Kubernetes Provider Configuration: <https://www.pulumi.com/registry/packages/kubernetes/installation-configuration/>
-- Pulumi Kubernetes Examples: <https://www.pulumi.com/registry/packages/kubernetes/how-to-guides/>
-- Kind Documentation: <https://kind.sigs.k8s.io/>
-- Kind Configuration: <https://kind.sigs.k8s.io/docs/user/configuration/>
-- Kubernetes Deployments: <https://kubernetes.io/docs/concepts/workloads/controllers/deployment/>
-- Kubernetes Services: <https://kubernetes.io/docs/concepts/services-networking/service/>
-- ConfigMaps: <https://kubernetes.io/docs/concepts/configuration/configmap/>
-- Probes: <https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/>
-- Resource Management: <https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/>
-- Pulumi Drift Detection: <https://www.pulumi.com/docs/deployments/deployments/drift/>
-
-> Kubernetes APIs, provider behavior, and container image versions evolve. Validate the code and commands against the versions used by your repository before applying the design to a production cluster.
+- Pulumi YAML Language Reference: https://www.pulumi.com/docs/iac/languages-sdks/yaml/yaml-language-reference/
+- Pulumi Stacks: https://www.pulumi.com/docs/iac/concepts/stacks/
+- Pulumi Configuration: https://www.pulumi.com/docs/iac/concepts/config/
+- Stack Settings File Reference: https://www.pulumi.com/docs/iac/concepts/projects/stack-settings-file/
+- Pulumi Kubernetes Provider: https://www.pulumi.com/registry/packages/kubernetes/
+- Pulumi Kubernetes Installation and Configuration: https://www.pulumi.com/registry/packages/kubernetes/installation-configuration/
+- Kubernetes Namespaces: https://kubernetes.io/docs/concepts/overview/working-with-objects/namespaces/
+- Kubernetes Deployments: https://kubernetes.io/docs/concepts/workloads/controllers/deployment/
+- Kubernetes ResourceQuota: https://kubernetes.io/docs/concepts/policy/resource-quotas/
+- Kubernetes Probes: https://kubernetes.io/docs/concepts/configuration/liveness-readiness-startup-probes/
